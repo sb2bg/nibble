@@ -1,0 +1,12 @@
+zig-out/
+.zig-cache/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.wasm
+.DS_Store
+roms/
