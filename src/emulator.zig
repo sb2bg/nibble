@@ -1,8 +1,9 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Cpu = @import("cpu.zig").Cpu;
-const Bus = @import("bus.zig").Bus;
-const Rom = @import("rom.zig").Rom;
+const Cpu = @import("cpu/cpu.zig").Cpu;
+const Bus = @import("memory/bus.zig").Bus;
+const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
+const Timer = @import("timer.zig").Timer;
 
 pub const EmulatorOptions = struct {
     debug: bool = false,
@@ -14,37 +15,32 @@ pub const Emulator = struct {
     allocator: Allocator,
     cpu: Cpu,
     bus: Bus,
-    rom: Rom,
+    timer: Timer,
     options: EmulatorOptions,
 
     // Runtime state
     steps: usize = 0,
     running: bool = false,
 
+    /// Initialize the emulator with a ROM file
     pub fn init(allocator: Allocator, rom_path: []const u8, options: EmulatorOptions) !Emulator {
-        // Load the ROM
-        var rom = try Rom.load(allocator, rom_path);
-        errdefer rom.deinit();
+        // Load the cartridge
+        var cartridge = try Cartridge.load(allocator, rom_path);
+        errdefer cartridge.deinit();
 
-        // Create bus with the loaded ROM
-        var emu = Emulator{
+        return Emulator{
             .allocator = allocator,
             .cpu = Cpu.init(),
-            .bus = undefined, // Will be set below
-            .rom = rom,
+            .bus = Bus.init(allocator, cartridge),
+            .timer = Timer.init(),
             .options = options,
             .steps = 0,
             .running = false,
         };
-
-        // Initialize bus with pointer to the rom field
-        emu.bus = Bus.init(&emu.rom);
-
-        return emu;
     }
 
     pub fn deinit(self: *Emulator) void {
-        self.rom.deinit();
+        self.bus.deinit();
     }
 
     /// Run the emulator's main loop
@@ -52,7 +48,7 @@ pub const Emulator = struct {
         self.running = true;
 
         if (self.options.debug) {
-            self.rom.printInfo();
+            self.bus.cartridge.printInfo();
             std.debug.print("\n=== Starting Execution ===\n\n", .{});
             std.debug.print("Initial state:\n", .{});
             self.printCpuState();
@@ -83,14 +79,20 @@ pub const Emulator = struct {
         }
     }
 
-    /// Execute a single CPU step
+    /// Execute a single CPU step and tick other components
     pub fn step(self: *Emulator) void {
         const pc_before = self.cpu.pc;
-        self.cpu.step(&self.bus);
+
+        // Execute CPU instruction (returns cycles used)
+        const cycles = self.cpu.step(&self.bus);
+
+        // Tick timer with T-cycles (4 T-cycles per M-cycle for most instructions)
+        self.timer.tick(cycles, &self.bus.io);
+
         self.steps += 1;
 
         if (self.options.debug) {
-            std.debug.print("\nStep {d} (PC=0x{X:0>4}):\n", .{ self.steps, pc_before });
+            std.debug.print("\nStep {d} (PC=0x{X:0>4}, cycles={d}):\n", .{ self.steps, pc_before, cycles });
             self.printCpuState();
         }
     }
@@ -102,18 +104,11 @@ pub const Emulator = struct {
 
     /// Reset the emulator (keeps ROM loaded)
     pub fn reset(self: *Emulator) void {
-        self.cpu = Cpu.init();
+        self.cpu.reset();
+        self.bus.reset();
+        self.timer.reset();
         self.steps = 0;
         self.running = false;
-
-        // Reset bus memory
-        self.bus = Bus.init(&self.rom);
-
-        // Reset ROM MBC state
-        self.rom.rom_bank = 1;
-        self.rom.ram_bank = 0;
-        self.rom.ram_enabled = false;
-        self.rom.banking_mode = 0;
     }
 
     fn printCpuState(self: *const Emulator) void {
@@ -128,11 +123,32 @@ pub const Emulator = struct {
             cpu.h(),
             cpu.l(),
         });
-        std.debug.print("SP: 0x{X:0>4} PC: 0x{X:0>4}\n", .{ cpu.sp, cpu.pc });
+        std.debug.print("SP: 0x{X:0>4} PC: 0x{X:0>4} IME: {s} Cycles: {d}\n", .{
+            cpu.sp,
+            cpu.pc,
+            if (cpu.ime) "ON" else "OFF",
+            cpu.cycles,
+        });
     }
 
-    /// Get ROM info for display
-    pub fn getRomInfo(self: *const Emulator) *const Rom {
-        return &self.rom;
+    /// Get cartridge info for display
+    pub fn getCartridgeInfo(self: *const Emulator) *const Cartridge {
+        return &self.bus.cartridge;
+    }
+
+    /// Print serial output (useful for test ROMs)
+    pub fn printSerialOutput(self: *const Emulator) void {
+        const output = self.bus.getSerialOutput();
+        if (output.len > 0) {
+            std.debug.print("\n=== Serial Output ({d} bytes) ===\n", .{output.len});
+            for (output) |byte| {
+                if (byte >= 0x20 and byte < 0x7F or byte == '\n' or byte == '\r') {
+                    std.debug.print("{c}", .{byte});
+                } else {
+                    std.debug.print("[{X:0>2}]", .{byte});
+                }
+            }
+            std.debug.print("\n", .{});
+        }
     }
 };
