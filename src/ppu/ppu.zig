@@ -1,5 +1,7 @@
 const std = @import("std");
 const sdl = @import("../sdl.zig");
+const IoReg = @import("../memory/io.zig").IoReg;
+const Interrupt = @import("../memory/io.zig").Interrupt;
 
 /// Game Boy screen dimensions
 pub const SCREEN_WIDTH = 160;
@@ -139,12 +141,26 @@ pub const Ppu = struct {
 
     /// Update STAT register mode bits
     fn setMode(self: *Ppu, mode: PpuMode, bus: anytype) void {
+        const old_mode = self.mode;
         self.mode = mode;
 
         // Update STAT register bits 0-1 with the current mode
         const stat = bus.io.getStat();
         const new_stat = (stat & 0xFC) | @intFromEnum(mode);
-        bus.io.data[@intFromEnum(@import("../memory/io.zig").IoReg.STAT)] = new_stat;
+        bus.io.data[@intFromEnum(IoReg.STAT)] = new_stat;
+
+        if (mode != old_mode) {
+            const mode_interrupt_enabled = switch (mode) {
+                .HBlank => (new_stat & 0x08) != 0, // Mode 0 interrupt enable
+                .VBlank => (new_stat & 0x10) != 0, // Mode 1 interrupt enable
+                .OamSearch => (new_stat & 0x20) != 0, // Mode 2 interrupt enable
+                .PixelTransfer => false, // No STAT interrupt for mode 3
+            };
+
+            if (mode_interrupt_enabled) {
+                bus.io.requestInterrupt(Interrupt.LCD_STAT);
+            }
+        }
     }
 
     /// Tick the PPU with the given number of cycles
@@ -179,7 +195,7 @@ pub const Ppu = struct {
                     if (self.ly == 144) {
                         // Enter VBlank
                         self.setMode(.VBlank, bus);
-                        bus.io.requestInterrupt(@import("../memory/io.zig").Interrupt.VBLANK);
+                        bus.io.requestInterrupt(Interrupt.VBLANK);
                         self.present(); // Display frame
                     } else {
                         // Next scanline
