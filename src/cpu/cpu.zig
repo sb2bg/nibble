@@ -350,7 +350,8 @@ pub const Cpu = struct {
                 break :blk 4;
             },
             .ei => blk: {
-                self.ime_enable_delay = 2;
+                self.ime = true;
+                self.ime_enable_delay = 0;
                 break :blk 4;
             },
 
