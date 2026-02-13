@@ -121,11 +121,12 @@ pub const IoRegisters = struct {
             .serial_output = std.ArrayList(u8){},
         };
 
-        // Set initial values for some registers
+        // Set initial values for some registers (post-boot ROM values)
         io.data[@intFromEnum(IoReg.JOYP)] = 0xCF;
         io.data[@intFromEnum(IoReg.IF)] = 0xE1;
         io.data[@intFromEnum(IoReg.LCDC)] = 0x91;
-        io.data[@intFromEnum(IoReg.STAT)] = 0x85;
+        io.data[@intFromEnum(IoReg.STAT)] = 0x81; // Mode 1 (VBlank) with bit 7 set
+        io.data[@intFromEnum(IoReg.LY)] = 0x91; // Post-boot LY value (in VBlank)
         io.data[@intFromEnum(IoReg.BGP)] = 0xFC;
         io.data[@intFromEnum(IoReg.NR52)] = 0xF1;
 
@@ -171,8 +172,8 @@ pub const IoRegisters = struct {
                 // LY is read-only, writes are ignored
             },
             .STAT => {
-                // Only bits 3-6 are writable
-                self.data[addr] = (self.data[addr] & 0x87) | (val & 0x78);
+                // Use setStat to handle writable bits properly
+                self.setStat(val);
             },
             .DMA => {
                 // Start DMA transfer
@@ -256,5 +257,66 @@ pub const IoRegisters = struct {
     /// Get serial output buffer (for test ROMs)
     pub fn getSerialOutput(self: *const IoRegisters) []const u8 {
         return self.serial_output.items;
+    }
+
+    // PPU register helpers
+    pub fn getLcdc(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.LCDC)];
+    }
+
+    pub fn getScy(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.SCY)];
+    }
+
+    pub fn getScx(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.SCX)];
+    }
+
+    pub fn getBgp(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.BGP)];
+    }
+
+    pub fn getLyc(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.LYC)];
+    }
+
+    pub fn getStat(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.STAT)];
+    }
+
+    pub fn getWy(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.WY)];
+    }
+
+    pub fn getWx(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.WX)];
+    }
+
+    pub fn setStat(self: *IoRegisters, stat: u8) void {
+        // Bit 7 is unused, bits 0-2 are read-only (mode and LYC flag)
+        // Only bits 3-6 are writable
+        const writable_bits = stat & 0x78;
+        const readonly_bits = self.data[@intFromEnum(IoReg.STAT)] & 0x07;
+        self.data[@intFromEnum(IoReg.STAT)] = writable_bits | readonly_bits | 0x80;
+    }
+
+    pub fn setLy(self: *IoRegisters, ly: u8) void {
+        self.data[@intFromEnum(IoReg.LY)] = ly;
+
+        // Check LY=LYC comparison
+        const lyc = self.getLyc();
+        const stat = self.getStat();
+
+        // Update LYC flag (bit 2) in STAT
+        if (ly == lyc) {
+            self.data[@intFromEnum(IoReg.STAT)] |= 0x04; // Set LYC=LY flag
+
+            // Trigger STAT interrupt if LYC interrupt is enabled (bit 6)
+            if (stat & 0x40 != 0) {
+                self.requestInterrupt(Interrupt.LCD_STAT);
+            }
+        } else {
+            self.data[@intFromEnum(IoReg.STAT)] &= ~@as(u8, 0x04); // Clear LYC=LY flag
+        }
     }
 };
