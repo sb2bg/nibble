@@ -46,6 +46,10 @@ pub const Instruction = union(enum) {
     // 8-bit Loads
     ld_r_r: struct { dst: Reg8, src: Reg8 }, // LD r, r'
     ld_r_n: struct { dst: Reg8, value: u8 }, // LD r, n
+    ld_a_bc, // LD A, (BC)
+    ld_a_de, // LD A, (DE)
+    ld_bc_a, // LD (BC), A
+    ld_de_a, // LD (DE), A
     ld_a_mem: u16, // LD A, (nn)
     ld_mem_a: u16, // LD (nn), A
     ldh_a_n: u8, // LDH A, (n) - LD A, (0xFF00+n)
@@ -180,12 +184,12 @@ pub const Instruction = union(enum) {
             0x3E => .{ .ld_r_n = .{ .dst = .A, .value = reader.read() } },
 
             // LD A, (rr)
-            0x0A => .{ .ld_r_r = .{ .dst = .A, .src = .HL_INDIRECT } }, // Actually LD A, (BC) - needs special handling
-            0x1A => .{ .ld_r_r = .{ .dst = .A, .src = .HL_INDIRECT } }, // Actually LD A, (DE) - needs special handling
+            0x0A => .ld_a_bc,
+            0x1A => .ld_a_de,
 
             // LD (rr), A
-            0x02 => .{ .ld_r_r = .{ .dst = .HL_INDIRECT, .src = .A } }, // Actually LD (BC), A
-            0x12 => .{ .ld_r_r = .{ .dst = .HL_INDIRECT, .src = .A } }, // Actually LD (DE), A
+            0x02 => .ld_bc_a,
+            0x12 => .ld_de_a,
 
             // LD A, (nn) / LD (nn), A
             0xFA => .{ .ld_a_mem = readU16(reader) },
