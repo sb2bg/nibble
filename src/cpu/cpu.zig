@@ -37,8 +37,9 @@ pub const Cpu = struct {
 
     // Interrupt state
     ime: bool, // Interrupt Master Enable
-    ime_scheduled: bool, // EI enables IME after next instruction
+    ime_enable_delay: u2, // EI enables IME after the next instruction
     halted: bool, // CPU is halted (waiting for interrupt)
+    halt_bug: bool, // HALT bug: next opcode fetch does not increment PC
 
     // Cycle tracking
     cycles: u64 = 0, // Total cycles executed
@@ -61,8 +62,9 @@ pub const Cpu = struct {
             .sp = 0xFFFE,
             .pc = 0x0100,
             .ime = false,
-            .ime_scheduled = false,
+            .ime_enable_delay = 0,
             .halted = false,
+            .halt_bug = false,
         };
     }
 
@@ -145,7 +147,11 @@ pub const Cpu = struct {
 
     pub fn fetch(self: *Cpu, bus: *const Bus) u8 {
         const val = bus.read(self.pc);
-        self.pc +%= 1;
+        if (self.halt_bug) {
+            self.halt_bug = false;
+        } else {
+            self.pc +%= 1;
+        }
         return val;
     }
 
@@ -304,6 +310,20 @@ pub const Cpu = struct {
         return null;
     }
 
+    fn pendingInterrupts(bus: *const Bus) u8 {
+        const ie = bus.ie_register;
+        const if_reg = bus.io.data[@intFromEnum(IoReg.IF)];
+        return ie & if_reg & 0x1F;
+    }
+
+    fn tickImeEnableDelay(self: *Cpu) void {
+        if (self.ime_enable_delay == 0) return;
+        self.ime_enable_delay -= 1;
+        if (self.ime_enable_delay == 0) {
+            self.ime = true;
+        }
+    }
+
     // =========================================================================
     // Execute
     // =========================================================================
@@ -313,16 +333,24 @@ pub const Cpu = struct {
         return switch (inst) {
             .nop => 4,
             .halt => blk: {
-                self.halted = true;
+                if (!self.ime and pendingInterrupts(bus) != 0) {
+                    // HALT bug: CPU continues, but the next opcode fetch won't
+                    // increment PC.
+                    self.halted = false;
+                    self.halt_bug = true;
+                } else {
+                    self.halted = true;
+                }
                 break :blk 4;
             },
             .stop => 4, // TODO: implement properly
             .di => blk: {
                 self.ime = false;
+                self.ime_enable_delay = 0;
                 break :blk 4;
             },
             .ei => blk: {
-                self.ime_scheduled = true;
+                self.ime_enable_delay = 2;
                 break :blk 4;
             },
 
@@ -337,6 +365,22 @@ pub const Cpu = struct {
             .ld_r_n => |args| blk: {
                 self.writeReg8(args.dst, args.value, bus);
                 break :blk if (args.dst == .HL_INDIRECT) 12 else 8;
+            },
+            .ld_a_bc => blk: {
+                self.setA(bus.read(self.bc));
+                break :blk 8;
+            },
+            .ld_a_de => blk: {
+                self.setA(bus.read(self.de));
+                break :blk 8;
+            },
+            .ld_bc_a => blk: {
+                bus.write(self.bc, self.a());
+                break :blk 8;
+            },
+            .ld_de_a => blk: {
+                bus.write(self.de, self.a());
+                break :blk 8;
             },
             .ld_a_mem => |addr| blk: {
                 self.setA(bus.read(addr));
@@ -648,6 +692,7 @@ pub const Cpu = struct {
             .reti => blk: {
                 self.pc = self.pop(bus);
                 self.ime = true;
+                self.ime_enable_delay = 0;
                 break :blk 16;
             },
             .rst => |vec| blk: {
@@ -906,12 +951,6 @@ pub const Cpu = struct {
     /// Execute one CPU step: handle interrupts, then fetch-decode-execute
     /// Returns the number of cycles used
     pub fn step(self: *Cpu, bus: *Bus) u8 {
-        // Handle scheduled IME enable (from EI instruction)
-        if (self.ime_scheduled) {
-            self.ime_scheduled = false;
-            self.ime = true;
-        }
-
         // Check for interrupts
         if (self.handleInterrupts(bus)) |int_cycles| {
             self.cycles += int_cycles;
@@ -927,6 +966,7 @@ pub const Cpu = struct {
         // Normal instruction execution
         const inst = self.decode(bus);
         const cycles = self.execute(inst, bus);
+        self.tickImeEnableDelay();
         self.cycles += cycles;
         return cycles;
     }
