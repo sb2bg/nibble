@@ -72,6 +72,14 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
 
     // Clap dependency for command-line argument parsing
-    const clap = b.dependency("clap", .{});
+    const clap = b.dependency("clap", .{
+        .optimize = .ReleaseFast,
+        .target = target,
+    });
     exe.root_module.addImport("clap", clap.module("clap"));
+
+    // SDL dependency for graphics and input
+    // Use system compiler to avoid Zig's C frontend issues with ARM NEON headers
+    exe.root_module.link_libc = true;
+    exe.linkSystemLibrary2("sdl2", .{ .use_pkg_config = .force });
 }
