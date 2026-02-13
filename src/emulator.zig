@@ -4,11 +4,13 @@ const Cpu = @import("cpu/cpu.zig").Cpu;
 const Bus = @import("memory/bus.zig").Bus;
 const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 const Timer = @import("timer.zig").Timer;
+const Ppu = @import("ppu/ppu.zig").Ppu;
 
 pub const EmulatorOptions = struct {
     debug: bool = false,
     max_steps: ?usize = null, // null means run indefinitely
     breakpoint: ?u16 = null,
+    headless: bool = false, // Run without graphics (for testing)
 };
 
 pub const Emulator = struct {
@@ -16,6 +18,7 @@ pub const Emulator = struct {
     cpu: Cpu,
     bus: Bus,
     timer: Timer,
+    ppu: ?Ppu,
     options: EmulatorOptions,
 
     // Runtime state
@@ -28,11 +31,23 @@ pub const Emulator = struct {
         var cartridge = try Cartridge.load(allocator, rom_path);
         errdefer cartridge.deinit();
 
+        // Initialize PPU (unless headless mode)
+        var ppu: ?Ppu = null;
+        if (!options.headless) {
+            ppu = Ppu.init() catch |err| blk: {
+                std.debug.print("Warning: Failed to initialize PPU: {any}\n", .{err});
+                std.debug.print("Running in headless mode\n", .{});
+                break :blk null;
+            };
+        }
+        errdefer if (ppu) |*p| p.deinit();
+
         return Emulator{
             .allocator = allocator,
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
             .timer = Timer.init(),
+            .ppu = ppu,
             .options = options,
             .steps = 0,
             .running = false,
@@ -40,6 +55,7 @@ pub const Emulator = struct {
     }
 
     pub fn deinit(self: *Emulator) void {
+        if (self.ppu) |*p| p.deinit();
         self.bus.deinit();
     }
 
@@ -54,7 +70,20 @@ pub const Emulator = struct {
             self.printCpuState();
         }
 
+        // Enable PPU if LCDC bit 7 is set
+        if (self.ppu) |*ppu| {
+            const lcdc = self.bus.io.getLcdc();
+            ppu.setEnabled((lcdc & 0x80) != 0);
+        }
+
         while (self.running) {
+            // Check for SDL events (window close, etc)
+            if (self.ppu) |*ppu| {
+                if (!ppu.pollEvents()) {
+                    break; // User closed window
+                }
+            }
+
             self.step();
 
             // Check max steps limit
@@ -89,6 +118,15 @@ pub const Emulator = struct {
         // Tick timer with T-cycles (4 T-cycles per M-cycle for most instructions)
         self.timer.tick(cycles, &self.bus.io);
 
+        // Tick PPU
+        if (self.ppu) |*ppu| {
+            ppu.tick(cycles, &self.bus);
+
+            // Update PPU enabled state from LCDC
+            const lcdc = self.bus.io.getLcdc();
+            ppu.setEnabled((lcdc & 0x80) != 0);
+        }
+
         self.steps += 1;
 
         if (self.options.debug) {
@@ -107,6 +145,7 @@ pub const Emulator = struct {
         self.cpu.reset();
         self.bus.reset();
         self.timer.reset();
+        if (self.ppu) |*ppu| ppu.reset();
         self.steps = 0;
         self.running = false;
     }

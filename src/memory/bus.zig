@@ -53,6 +53,14 @@ pub const Bus = struct {
         return self.io.getSerialOutput();
     }
 
+    /// Read from VRAM (for PPU)
+    pub fn readVram(self: *const Bus, addr: u16) u8 {
+        if (addr >= 0x8000 and addr <= 0x9FFF) {
+            return self.vram[addr - 0x8000];
+        }
+        return 0xFF;
+    }
+
     pub fn read(self: *const Bus, addr: u16) u8 {
         return switch (addr) {
             // ROM Bank 0 + Switchable ROM Bank

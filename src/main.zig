@@ -8,6 +8,7 @@ const params = clap.parseParamsComptime(
     \\-d, --debug            Enable debug output during execution.
     \\-s, --steps <usize>    Maximum number of steps to execute (default: unlimited).
     \\-b, --breakpoint <u16> Set a breakpoint at the specified address (hex).
+    \\--headless             Run without graphics (for testing).
     \\<str>                  ROM file to load.
     \\
 );
@@ -45,10 +46,12 @@ pub fn main() !void {
             \\  -d, --debug             Enable debug output during execution
             \\  -s, --steps <COUNT>     Maximum number of steps to execute
             \\  -b, --breakpoint <ADDR> Set a breakpoint at the specified address (hex)
+            \\  --headless              Run without graphics (for testing)
             \\
             \\Example:
             \\  nibble roms/cpu_instrs/cpu_instrs.gb
             \\  nibble -d -s 1000 roms/cpu_instrs/cpu_instrs.gb
+            \\  nibble --headless -s 10000000 roms/cpu_instrs/cpu_instrs.gb
             \\
         , .{});
         try stdout_writer.interface.flush();
@@ -72,6 +75,7 @@ pub fn main() !void {
         .debug = res.args.debug != 0,
         .max_steps = max_steps orelse null,
         .breakpoint = breakpoint,
+        .headless = res.args.headless != 0,
     };
 
     // Initialize and run the emulator
