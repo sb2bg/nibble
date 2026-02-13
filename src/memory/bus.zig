@@ -119,7 +119,19 @@ pub const Bus = struct {
             0xFEA0...0xFEFF => {},
 
             // I/O Registers
-            0xFF00...0xFF7F => self.io.write(@truncate(addr - 0xFF00), val),
+            0xFF00...0xFF7F => {
+                const io_addr: u8 = @truncate(addr - 0xFF00);
+                self.io.write(io_addr, val);
+
+                // Execute OAM DMA immediately for functional correctness.
+                if (io_addr == @intFromEnum(IoReg.DMA)) {
+                    const source_base: u16 = @as(u16, val) << 8;
+                    var i: usize = 0;
+                    while (i < self.oam.len) : (i += 1) {
+                        self.oam[i] = self.read(source_base + @as(u16, @intCast(i)));
+                    }
+                }
+            },
 
             // High RAM
             0xFF80...0xFFFE => self.hram[addr - 0xFF80] = val,
