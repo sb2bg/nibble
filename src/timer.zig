@@ -33,6 +33,23 @@ pub const Timer = struct {
         const tac = io.data[@intFromEnum(IoReg.TAC)];
         const timer_enabled = (tac & 0x04) != 0;
 
+        // DIV can be reset via I/O writes; keep the timer's internal counter in
+        // sync with that observable state.
+        if (self.div_counter != io.div_counter) {
+            const old_div = self.div_counter;
+            const new_div = io.div_counter;
+            self.div_counter = new_div;
+
+            if (timer_enabled) {
+                const bit_pos = getTimerBitPos(tac);
+                const old_bit = (old_div >> bit_pos) & 1;
+                const new_bit = (new_div >> bit_pos) & 1;
+                if (old_bit == 1 and new_bit == 0) {
+                    self.incrementTima(io);
+                }
+            }
+        }
+
         var i: u8 = 0;
         while (i < cycles) : (i += 1) {
             // Increment DIV counter every T-cycle
