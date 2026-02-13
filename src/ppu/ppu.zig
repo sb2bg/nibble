@@ -40,6 +40,7 @@ pub const Ppu = struct {
     window: ?*sdl.Window,
     renderer: ?*sdl.Renderer,
     texture: ?*sdl.Texture,
+    sdl_initialized: bool,
 
     // PPU state
     mode: PpuMode,
@@ -98,6 +99,21 @@ pub const Ppu = struct {
             .window = window,
             .renderer = renderer,
             .texture = texture,
+            .sdl_initialized = true,
+            .mode = .VBlank, // Start in VBlank (post-boot ROM state)
+            .mode_cycles = 0,
+            .ly = 0x91, // Post-boot LY value (145, in VBlank)
+            .enabled = false,
+        };
+    }
+
+    pub fn initHeadless() Ppu {
+        return Ppu{
+            .frame_buffer = [_][SCREEN_WIDTH]DmgColor{[_]DmgColor{.White} ** SCREEN_WIDTH} ** SCREEN_HEIGHT,
+            .window = null,
+            .renderer = null,
+            .texture = null,
+            .sdl_initialized = false,
             .mode = .VBlank, // Start in VBlank (post-boot ROM state)
             .mode_cycles = 0,
             .ly = 0x91, // Post-boot LY value (145, in VBlank)
@@ -109,7 +125,7 @@ pub const Ppu = struct {
         if (self.texture) |t| sdl.destroyTexture(t);
         if (self.renderer) |r| sdl.destroyRenderer(r);
         if (self.window) |w| sdl.destroyWindow(w);
-        sdl.quit();
+        if (self.sdl_initialized) sdl.quit();
     }
 
     /// Reset PPU state
