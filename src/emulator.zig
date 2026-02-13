@@ -31,15 +31,16 @@ pub const Emulator = struct {
         var cartridge = try Cartridge.load(allocator, rom_path);
         errdefer cartridge.deinit();
 
-        // Initialize PPU (unless headless mode)
-        var ppu: ?Ppu = null;
-        if (!options.headless) {
-            ppu = Ppu.init() catch |err| blk: {
-                std.debug.print("Warning: Failed to initialize PPU: {any}\n", .{err});
-                std.debug.print("Running in headless mode\n", .{});
-                break :blk null;
+        // Initialize PPU. In headless mode (or if SDL fails), keep a logic-only
+        // PPU active so LY/STAT/VBlank timing still advances.
+        const ppu: ?Ppu = if (options.headless)
+            Ppu.initHeadless()
+        else
+            Ppu.init() catch |err| blk: {
+                std.debug.print("Warning: Failed to initialize SDL PPU: {any}\n", .{err});
+                std.debug.print("Falling back to headless PPU timing\n", .{});
+                break :blk Ppu.initHeadless();
             };
-        }
         errdefer if (ppu) |*p| p.deinit();
 
         return Emulator{
