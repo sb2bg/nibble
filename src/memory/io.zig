@@ -239,6 +239,10 @@ pub const IoRegisters = struct {
         self.joypad_buttons = state;
     }
 
+    pub fn getJoypadState(self: *const IoRegisters) u8 {
+        return self.joypad_buttons;
+    }
+
     /// Request an interrupt by setting a bit in IF
     pub fn requestInterrupt(self: *IoRegisters, interrupt: u8) void {
         self.data[@intFromEnum(IoReg.IF)] |= interrupt;

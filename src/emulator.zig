@@ -80,7 +80,7 @@ pub const Emulator = struct {
         while (self.running) {
             // Check for SDL events (window close, etc)
             if (self.ppu) |*ppu| {
-                if (!ppu.pollEvents()) {
+                if (!ppu.pollEvents(&self.bus)) {
                     break; // User closed window
                 }
             }
@@ -112,20 +112,32 @@ pub const Emulator = struct {
     /// Execute a single CPU step and tick other components
     pub fn step(self: *Emulator) void {
         const pc_before = self.cpu.pc;
+        var clocked_cycles: u16 = 0;
+
+        const HookContext = struct {
+            emu: *Emulator,
+            clocked: *u16,
+
+            fn tick(ptr: *anyopaque, cycles: u8) void {
+                const ctx: *@This() = @ptrCast(@alignCast(ptr));
+                ctx.emu.tickPeripherals(cycles);
+                ctx.clocked.* +%= cycles;
+            }
+        };
+        var hook_ctx = HookContext{ .emu = self, .clocked = &clocked_cycles };
+        self.bus.setCycleHook(.{
+            .context = @ptrCast(&hook_ctx),
+            .tickFn = HookContext.tick,
+        });
+        defer self.bus.setCycleHook(null);
 
         // Execute CPU instruction (returns cycles used)
         const cycles = self.cpu.step(&self.bus);
 
-        // Tick timer with T-cycles (4 T-cycles per M-cycle for most instructions)
-        self.timer.tick(cycles, &self.bus.io);
-
-        // Tick PPU
-        if (self.ppu) |*ppu| {
-            ppu.tick(cycles, &self.bus);
-
-            // Update PPU enabled state from LCDC
-            const lcdc = self.bus.io.getLcdc();
-            ppu.setEnabled((lcdc & 0x80) != 0);
+        // Some instructions have internal cycles without memory accesses.
+        if (clocked_cycles < @as(u16, cycles)) {
+            const remaining: u8 = @intCast(@as(u16, cycles) - clocked_cycles);
+            self.tickPeripherals(remaining);
         }
 
         self.steps += 1;
@@ -133,6 +145,20 @@ pub const Emulator = struct {
         if (self.options.debug) {
             std.debug.print("\nStep {d} (PC=0x{X:0>4}, cycles={d}):\n", .{ self.steps, pc_before, cycles });
             self.printCpuState();
+        }
+    }
+
+    fn tickPeripherals(self: *Emulator, cycles: u8) void {
+        if (cycles == 0) return;
+
+        self.timer.tick(cycles, &self.bus.io);
+
+        if (self.ppu) |*ppu| {
+            ppu.tick(cycles, &self.bus);
+
+            // Update PPU enabled state from LCDC
+            const lcdc = self.bus.io.getLcdc();
+            ppu.setEnabled((lcdc & 0x80) != 0);
         }
     }
 

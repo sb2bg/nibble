@@ -367,15 +367,38 @@ pub const Ppu = struct {
         }
     }
 
-    /// Check for SDL events (window close, etc)
-    pub fn pollEvents(self: *Ppu) bool {
-        _ = self;
+    /// Check for SDL events (window close, keyboard) and update joypad state.
+    pub fn pollEvents(self: *Ppu, bus: anytype) bool {
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
             if (event.type == sdl.QUIT) {
                 return false; // Request quit
             }
         }
+
+        if (!self.sdl_initialized) return true;
+
+        const keys = sdl.getKeyboardState();
+        if (keys.len == 0) return true;
+
+        var state: u8 = 0xFF; // 0 = pressed, 1 = released
+        if (isPressed(keys, sdl.SCANCODE_RIGHT)) state &= ~@as(u8, 0x01);
+        if (isPressed(keys, sdl.SCANCODE_LEFT)) state &= ~@as(u8, 0x02);
+        if (isPressed(keys, sdl.SCANCODE_UP)) state &= ~@as(u8, 0x04);
+        if (isPressed(keys, sdl.SCANCODE_DOWN)) state &= ~@as(u8, 0x08);
+        if (isPressed(keys, sdl.SCANCODE_X)) state &= ~@as(u8, 0x10); // A
+        if (isPressed(keys, sdl.SCANCODE_Z)) state &= ~@as(u8, 0x20); // B
+        if (isPressed(keys, sdl.SCANCODE_BACKSPACE)) state &= ~@as(u8, 0x40); // Select
+        if (isPressed(keys, sdl.SCANCODE_RETURN)) state &= ~@as(u8, 0x80); // Start
+
+        const previous = bus.io.getJoypadState();
+        bus.io.setJoypadState(state);
+
+        // Request JOYPAD interrupt on new key press transitions.
+        if ((previous & ~state) != 0) {
+            bus.io.requestInterrupt(Interrupt.JOYPAD);
+        }
+
         return true; // Continue running
     }
 
@@ -387,5 +410,9 @@ pub const Ppu = struct {
             self.mode = .OamSearch;
             self.mode_cycles = 0;
         }
+    }
+
+    fn isPressed(keys: []const u8, scancode: usize) bool {
+        return scancode < keys.len and keys[scancode] != 0;
     }
 };

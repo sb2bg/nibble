@@ -7,6 +7,11 @@ const Cartridge = @import("../cartridge/cartridge.zig").Cartridge;
 
 /// Memory Bus - handles all memory reads and writes
 pub const Bus = struct {
+    pub const CycleHook = struct {
+        context: *anyopaque,
+        tickFn: *const fn (*anyopaque, u8) void,
+    };
+
     // Memory regions
     wram: [0x2000]u8, // Work RAM (0xC000-0xDFFF)
     hram: [0x7F]u8, // High RAM (0xFF80-0xFFFE)
@@ -20,6 +25,9 @@ pub const Bus = struct {
     // Cartridge (owns ROM + RAM + MBC)
     cartridge: Cartridge,
 
+    // Optional hook invoked on each CPU memory access (one M-cycle = 4 T-cycles)
+    cycle_hook: ?CycleHook,
+
     pub fn init(allocator: std.mem.Allocator, cartridge: Cartridge) Bus {
         return Bus{
             .wram = [_]u8{0} ** 0x2000,
@@ -29,6 +37,7 @@ pub const Bus = struct {
             .io = IoRegisters.init(allocator),
             .ie_register = 0,
             .cartridge = cartridge,
+            .cycle_hook = null,
         };
     }
 
@@ -48,6 +57,16 @@ pub const Bus = struct {
         self.cartridge.mbc.reset();
     }
 
+    pub fn setCycleHook(self: *Bus, hook: ?CycleHook) void {
+        self.cycle_hook = hook;
+    }
+
+    inline fn tickAccess(self: *const Bus) void {
+        if (self.cycle_hook) |hook| {
+            hook.tickFn(hook.context, 4);
+        }
+    }
+
     /// Get serial output for test ROMs
     pub fn getSerialOutput(self: *const Bus) []const u8 {
         return self.io.getSerialOutput();
@@ -62,6 +81,16 @@ pub const Bus = struct {
     }
 
     pub fn read(self: *const Bus, addr: u16) u8 {
+        return self.readInternal(addr, true);
+    }
+
+    fn readNoTick(self: *const Bus, addr: u16) u8 {
+        return self.readInternal(addr, false);
+    }
+
+    fn readInternal(self: *const Bus, addr: u16, count_cycle: bool) u8 {
+        if (count_cycle) self.tickAccess();
+
         return switch (addr) {
             // ROM Bank 0 + Switchable ROM Bank
             0x0000...0x7FFF => self.cartridge.mbc.readRom(addr),
@@ -96,6 +125,12 @@ pub const Bus = struct {
     }
 
     pub fn write(self: *Bus, addr: u16, val: u8) void {
+        self.writeInternal(addr, val, true);
+    }
+
+    fn writeInternal(self: *Bus, addr: u16, val: u8, count_cycle: bool) void {
+        if (count_cycle) self.tickAccess();
+
         switch (addr) {
             // ROM Bank 0 + Switchable ROM Bank (MBC registers)
             0x0000...0x7FFF => self.cartridge.mbc.writeRom(addr, val),
@@ -128,7 +163,7 @@ pub const Bus = struct {
                     const source_base: u16 = @as(u16, val) << 8;
                     var i: usize = 0;
                     while (i < self.oam.len) : (i += 1) {
-                        self.oam[i] = self.read(source_base + @as(u16, @intCast(i)));
+                        self.oam[i] = self.readNoTick(source_base + @as(u16, @intCast(i)));
                     }
                 }
             },

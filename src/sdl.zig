@@ -58,6 +58,17 @@ extern fn SDL_RenderPresent(renderer: *Renderer) void;
 extern fn SDL_RenderClear(renderer: *Renderer) c_int;
 
 extern fn SDL_PollEvent(event: *Event) c_int;
+extern fn SDL_GetKeyboardState(numkeys: ?*c_int) [*c]const u8;
+
+// Keyboard scancodes we map to DMG controls
+pub const SCANCODE_X: usize = 27; // A
+pub const SCANCODE_Z: usize = 29; // B
+pub const SCANCODE_RETURN: usize = 40; // Start
+pub const SCANCODE_BACKSPACE: usize = 42; // Select
+pub const SCANCODE_RIGHT: usize = 79;
+pub const SCANCODE_LEFT: usize = 80;
+pub const SCANCODE_DOWN: usize = 81;
+pub const SCANCODE_UP: usize = 82;
 
 // Zig-friendly wrappers
 pub fn init(flags: u32) !void {
@@ -122,4 +133,11 @@ pub fn renderClear(renderer: *Renderer) !void {
 
 pub fn pollEvent(event: *Event) bool {
     return SDL_PollEvent(event) != 0;
+}
+
+pub fn getKeyboardState() []const u8 {
+    var key_count: c_int = 0;
+    const ptr = SDL_GetKeyboardState(&key_count);
+    if (ptr == null or key_count <= 0) return &[_]u8{};
+    return ptr[0..@intCast(key_count)];
 }
