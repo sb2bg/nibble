@@ -59,12 +59,18 @@ extern fn SDL_RenderClear(renderer: *Renderer) c_int;
 
 extern fn SDL_PollEvent(event: *Event) c_int;
 extern fn SDL_GetKeyboardState(numkeys: ?*c_int) [*c]const u8;
+extern fn SDL_PumpEvents() void;
 
 // Keyboard scancodes we map to DMG controls
 pub const SCANCODE_X: usize = 27; // A
 pub const SCANCODE_Z: usize = 29; // B
+pub const SCANCODE_A: usize = 4; // A (alt)
+pub const SCANCODE_S: usize = 22; // B (alt)
 pub const SCANCODE_RETURN: usize = 40; // Start
+pub const SCANCODE_KP_ENTER: usize = 88; // Start (alt)
+pub const SCANCODE_SPACE: usize = 44; // Start (alt)
 pub const SCANCODE_BACKSPACE: usize = 42; // Select
+pub const SCANCODE_TAB: usize = 43; // Select (alt)
 pub const SCANCODE_RIGHT: usize = 79;
 pub const SCANCODE_LEFT: usize = 80;
 pub const SCANCODE_DOWN: usize = 81;
@@ -133,6 +139,10 @@ pub fn renderClear(renderer: *Renderer) !void {
 
 pub fn pollEvent(event: *Event) bool {
     return SDL_PollEvent(event) != 0;
+}
+
+pub fn pumpEvents() void {
+    SDL_PumpEvents();
 }
 
 pub fn getKeyboardState() []const u8 {

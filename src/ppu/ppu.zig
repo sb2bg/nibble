@@ -369,6 +369,8 @@ pub const Ppu = struct {
 
     /// Check for SDL events (window close, keyboard) and update joypad state.
     pub fn pollEvents(self: *Ppu, bus: anytype) bool {
+        if (!self.sdl_initialized) return true;
+
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
             if (event.type == sdl.QUIT) {
@@ -376,8 +378,7 @@ pub const Ppu = struct {
             }
         }
 
-        if (!self.sdl_initialized) return true;
-
+        sdl.pumpEvents();
         const keys = sdl.getKeyboardState();
         if (keys.len == 0) return true;
 
@@ -386,10 +387,10 @@ pub const Ppu = struct {
         if (isPressed(keys, sdl.SCANCODE_LEFT)) state &= ~@as(u8, 0x02);
         if (isPressed(keys, sdl.SCANCODE_UP)) state &= ~@as(u8, 0x04);
         if (isPressed(keys, sdl.SCANCODE_DOWN)) state &= ~@as(u8, 0x08);
-        if (isPressed(keys, sdl.SCANCODE_X)) state &= ~@as(u8, 0x10); // A
-        if (isPressed(keys, sdl.SCANCODE_Z)) state &= ~@as(u8, 0x20); // B
-        if (isPressed(keys, sdl.SCANCODE_BACKSPACE)) state &= ~@as(u8, 0x40); // Select
-        if (isPressed(keys, sdl.SCANCODE_RETURN)) state &= ~@as(u8, 0x80); // Start
+        if (isPressed(keys, sdl.SCANCODE_X) or isPressed(keys, sdl.SCANCODE_A)) state &= ~@as(u8, 0x10); // A
+        if (isPressed(keys, sdl.SCANCODE_Z) or isPressed(keys, sdl.SCANCODE_S)) state &= ~@as(u8, 0x20); // B
+        if (isPressed(keys, sdl.SCANCODE_BACKSPACE) or isPressed(keys, sdl.SCANCODE_TAB)) state &= ~@as(u8, 0x40); // Select
+        if (isPressed(keys, sdl.SCANCODE_RETURN) or isPressed(keys, sdl.SCANCODE_KP_ENTER) or isPressed(keys, sdl.SCANCODE_SPACE)) state &= ~@as(u8, 0x80); // Start
 
         const previous = bus.io.getJoypadState();
         bus.io.setJoypadState(state);

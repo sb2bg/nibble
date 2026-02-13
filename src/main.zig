@@ -48,6 +48,13 @@ pub fn main() !void {
             \\  -b, --breakpoint <ADDR> Set a breakpoint at the specified address (hex)
             \\  --headless              Run without graphics (for testing)
             \\
+            \\Controls:
+            \\  D-pad   : Arrow keys
+            \\  A       : X or A
+            \\  B       : Z or S
+            \\  Start   : Enter, keypad Enter, or Space
+            \\  Select  : Backspace or Tab
+            \\
             \\Example:
             \\  nibble roms/cpu_instrs/cpu_instrs.gb
             \\  nibble -d -s 1000 roms/cpu_instrs/cpu_instrs.gb
