@@ -103,6 +103,9 @@ pub const IoRegisters = struct {
     dma_offset: u8,
     dma_delay: u8,
 
+    // Current OAM scan row during mode 2 (0-19)
+    oam_scan_row: u8,
+
     // Serial output (for test ROMs)
     allocator: std.mem.Allocator,
     serial_output: std.ArrayList(u8),
@@ -117,6 +120,7 @@ pub const IoRegisters = struct {
             .dma_source = 0,
             .dma_offset = 0,
             .dma_delay = 0,
+            .oam_scan_row = 0,
             .allocator = allocator,
             .serial_output = std.ArrayList(u8){},
         };
@@ -268,6 +272,18 @@ pub const IoRegisters = struct {
         return self.data[@intFromEnum(IoReg.LCDC)];
     }
 
+    pub fn getPpuMode(self: *const IoRegisters) u2 {
+        return @truncate(self.data[@intFromEnum(IoReg.STAT)] & 0x03);
+    }
+
+    pub fn getOamScanRow(self: *const IoRegisters) u8 {
+        return self.oam_scan_row;
+    }
+
+    pub fn setOamScanRow(self: *IoRegisters, row: u8) void {
+        self.oam_scan_row = row;
+    }
+
     pub fn getScy(self: *const IoRegisters) u8 {
         return self.data[@intFromEnum(IoReg.SCY)];
     }
@@ -278,6 +294,14 @@ pub const IoRegisters = struct {
 
     pub fn getBgp(self: *const IoRegisters) u8 {
         return self.data[@intFromEnum(IoReg.BGP)];
+    }
+
+    pub fn getObp0(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.OBP0)];
+    }
+
+    pub fn getObp1(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.OBP1)];
     }
 
     pub fn getLyc(self: *const IoRegisters) u8 {
