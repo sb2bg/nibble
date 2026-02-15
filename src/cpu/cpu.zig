@@ -216,13 +216,17 @@ pub const Cpu = struct {
     // =========================================================================
 
     pub fn push(self: *Cpu, val: u16, bus: *Bus) void {
+        const sp_before_hi = self.sp;
         self.sp -%= 1;
         bus.write(self.sp, @truncate(val >> 8));
+        bus.triggerOamBugWriteIdu(sp_before_hi);
+
         self.sp -%= 1;
         bus.write(self.sp, @truncate(val));
     }
 
     pub fn pop(self: *Cpu, bus: *const Bus) u16 {
+        @constCast(bus).triggerOamBugReadIncDec(self.sp);
         const lo = bus.read(self.sp);
         self.sp +%= 1;
         const hi = bus.read(self.sp);
@@ -407,11 +411,13 @@ pub const Cpu = struct {
                 break :blk 8;
             },
             .ld_a_hli => blk: {
+                bus.triggerOamBugReadIncDec(self.hl);
                 self.setA(bus.read(self.hl));
                 self.hl +%= 1;
                 break :blk 8;
             },
             .ld_a_hld => blk: {
+                bus.triggerOamBugReadIncDec(self.hl);
                 self.setA(bus.read(self.hl));
                 self.hl -%= 1;
                 break :blk 8;
@@ -564,11 +570,18 @@ pub const Cpu = struct {
                 break :blk 12;
             },
             .inc_rr => |reg| blk: {
-                self.writeReg16(reg, self.readReg16(reg) +% 1);
+                const old = self.readReg16(reg);
+                bus.triggerOamBugWriteIdu(old);
+                // 2 M-cycles total: opcode fetch already consumed 1 M-cycle.
+                bus.tickInternal(4);
+                self.writeReg16(reg, old +% 1);
                 break :blk 8;
             },
             .dec_rr => |reg| blk: {
-                self.writeReg16(reg, self.readReg16(reg) -% 1);
+                const old = self.readReg16(reg);
+                bus.triggerOamBugWriteIdu(old);
+                bus.tickInternal(4);
+                self.writeReg16(reg, old -% 1);
                 break :blk 8;
             },
 

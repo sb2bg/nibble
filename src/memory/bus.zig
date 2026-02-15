@@ -61,10 +61,128 @@ pub const Bus = struct {
         self.cycle_hook = hook;
     }
 
+    pub fn tickInternal(self: *const Bus, cycles: u8) void {
+        if (cycles == 0) return;
+        if (self.cycle_hook) |hook| {
+            hook.tickFn(hook.context, cycles);
+        }
+    }
+
+    pub fn triggerOamBugWriteIdu(self: *Bus, addr: u16) void {
+        if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
+        const row = self.io.getOamScanRow();
+        if (row >= 19) return;
+        self.applyOamWriteCorruption(nextOamScanRow(row));
+    }
+
+    pub fn triggerOamBugWriteIduCurrentCycle(self: *Bus, addr: u16) void {
+        if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
+        self.applyOamWriteCorruption(self.io.getOamScanRow());
+    }
+
+    pub fn triggerOamBugReadIncDec(self: *Bus, addr: u16) void {
+        if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
+        const row = self.io.getOamScanRow();
+        if (row >= 19) return;
+        self.applyOamReadIncDecExtra(nextOamScanRow(row));
+    }
+
     inline fn tickAccess(self: *const Bus) void {
         if (self.cycle_hook) |hook| {
             hook.tickFn(hook.context, 4);
         }
+    }
+
+    inline fn isPpuInMode2(self: *const Bus) bool {
+        return self.io.getPpuMode() == 2;
+    }
+
+    inline fn isPpuOamBlocked(self: *const Bus) bool {
+        const mode = self.io.getPpuMode();
+        return mode == 2 or mode == 3;
+    }
+
+    inline fn isOamAddress(addr: u16) bool {
+        return addr >= 0xFE00 and addr <= 0xFEFF;
+    }
+
+    inline fn isOamMemoryAddress(addr: u16) bool {
+        return addr >= 0xFE00 and addr <= 0xFE9F;
+    }
+
+    inline fn nextOamScanRow(current: u8) u8 {
+        return @min(current + 1, 19);
+    }
+
+    inline fn getOamWord(self: *const Bus, row: u8, word: u8) u16 {
+        const index = @as(usize, row) * 8 + @as(usize, word) * 2;
+        const lo = self.oam[index];
+        const hi = self.oam[index + 1];
+        return (@as(u16, hi) << 8) | lo;
+    }
+
+    inline fn setOamWord(self: *Bus, row: u8, word: u8, value: u16) void {
+        const index = @as(usize, row) * 8 + @as(usize, word) * 2;
+        self.oam[index] = @truncate(value);
+        self.oam[index + 1] = @truncate(value >> 8);
+    }
+
+    fn copyOamTailFromPrevRow(self: *Bus, row: u8) void {
+        if (row == 0 or row >= 20) return;
+        var word: u8 = 1;
+        while (word < 4) : (word += 1) {
+            const prev = self.getOamWord(row - 1, word);
+            self.setOamWord(row, word, prev);
+        }
+    }
+
+    fn copyOamRow(self: *Bus, dst_row: u8, src_row: u8) void {
+        if (dst_row >= 20 or src_row >= 20) return;
+        var word: u8 = 0;
+        while (word < 4) : (word += 1) {
+            self.setOamWord(dst_row, word, self.getOamWord(src_row, word));
+        }
+    }
+
+    // Pattern for write-related corruption (INC/DEC rp, writes in mode 2).
+    fn applyOamWriteCorruption(self: *Bus, row: u8) void {
+        if (row == 0 or row >= 20) return;
+
+        const a = self.getOamWord(row, 0);
+        const b = self.getOamWord(row - 1, 0);
+        const c = self.getOamWord(row - 1, 2);
+
+        self.setOamWord(row, 0, ((a ^ c) & (b ^ c)) ^ c);
+        self.copyOamTailFromPrevRow(row);
+    }
+
+    // Pattern for read-related corruption (reads in mode 2).
+    fn applyOamReadCorruption(self: *Bus, row: u8) void {
+        if (row == 0 or row >= 20) return;
+
+        const a = self.getOamWord(row, 0);
+        const b = self.getOamWord(row - 1, 0);
+        const c = self.getOamWord(row - 1, 2);
+
+        self.setOamWord(row, 0, b | (a & c));
+        self.copyOamTailFromPrevRow(row);
+    }
+
+    // Extra transformation used when read coincides with IDU increment/decrement
+    // (for example LD A,(HL+) / LD A,(HL-)).
+    fn applyOamReadIncDecExtra(self: *Bus, row: u8) void {
+        if (row < 4 or row >= 19) return;
+
+        const a = self.getOamWord(row - 2, 0);
+        const b = self.getOamWord(row - 1, 0);
+        const c = self.getOamWord(row, 0);
+        const d = self.getOamWord(row - 1, 2);
+
+        const merged = (b & (a | c | d)) | (a & c & d);
+        self.setOamWord(row - 1, 0, merged);
+
+        self.copyOamRow(row, row - 1);
+        self.copyOamRow(row - 2, row - 1);
     }
 
     /// Get serial output for test ROMs
@@ -80,6 +198,14 @@ pub const Bus = struct {
         return 0xFF;
     }
 
+    /// Read from OAM directly (for PPU sprite rendering)
+    pub fn readOam(self: *const Bus, addr: u16) u8 {
+        if (addr >= 0xFE00 and addr <= 0xFE9F) {
+            return self.oam[addr - 0xFE00];
+        }
+        return 0xFF;
+    }
+
     pub fn read(self: *const Bus, addr: u16) u8 {
         return self.readInternal(addr, true);
     }
@@ -90,6 +216,14 @@ pub const Bus = struct {
 
     fn readInternal(self: *const Bus, addr: u16, count_cycle: bool) u8 {
         if (count_cycle) self.tickAccess();
+
+        if (isOamAddress(addr) and self.isPpuOamBlocked()) {
+            if (self.isPpuInMode2()) {
+                // Accessing OAM while mode 2 is active triggers DMG corruption.
+                @constCast(self).applyOamReadCorruption(self.io.getOamScanRow());
+            }
+            return 0xFF;
+        }
 
         return switch (addr) {
             // ROM Bank 0 + Switchable ROM Bank
@@ -129,7 +263,16 @@ pub const Bus = struct {
     }
 
     fn writeInternal(self: *Bus, addr: u16, val: u8, count_cycle: bool) void {
-        if (count_cycle) self.tickAccess();
+        const delay_tick_for_lcdc = count_cycle and addr == 0xFF40;
+        if (count_cycle and !delay_tick_for_lcdc) self.tickAccess();
+
+        if (isOamMemoryAddress(addr) and self.isPpuOamBlocked()) {
+            if (self.isPpuInMode2()) {
+                // Accessing OAM while mode 2 is active triggers DMG corruption.
+                self.applyOamWriteCorruption(self.io.getOamScanRow());
+            }
+            return;
+        }
 
         switch (addr) {
             // ROM Bank 0 + Switchable ROM Bank (MBC registers)
@@ -174,6 +317,9 @@ pub const Bus = struct {
             // Interrupt Enable Register
             0xFFFF => self.ie_register = val,
         }
+
+        if (delay_tick_for_lcdc) self.tickAccess();
+
     }
 
     /// Read 16-bit value (little endian)

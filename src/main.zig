@@ -54,6 +54,16 @@ pub fn main() !void {
             \\  B       : Z or S
             \\  Start   : Enter, keypad Enter, or Space
             \\  Select  : Backspace or Tab
+            \\  Mouse   : Click on-screen joypad buttons
+            \\
+            \\Management:
+            \\  P       : Pause/resume emulation
+            \\  R       : Reset emulator
+            \\  F5/F9   : Save/load state for active slot
+            \\  [ / ]   : Previous/next save slot
+            \\  F1      : Toggle side panel
+            \\  Esc     : Quit
+            \\  Mouse   : Click right-panel management buttons
             \\
             \\Example:
             \\  nibble roms/cpu_instrs/cpu_instrs.gb
@@ -93,6 +103,7 @@ pub fn main() !void {
     defer emu.deinit();
 
     emu.run();
+    emu.printCartRamTestOutput();
 
     // Print serial output summary (useful for test ROMs)
     if (!options.debug) {

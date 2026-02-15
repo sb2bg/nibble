@@ -10,14 +10,19 @@ Implemented core pieces:
 - CPU instruction decode/execute loop with interrupt handling
 - Memory bus with cartridge support and MBC banking (`ROM`, `MBC1`, `MBC2`, `MBC3`, `MBC5`)
 - Timer (`DIV/TIMA/TMA/TAC`)
-- PPU timing + background/window rendering
+- PPU timing + background/window/sprite rendering
 - SDL2 window output (with automatic headless fallback if SDL init fails)
+- Joypad input mapping + joypad interrupt signaling
+- Around-screen control deck UI:
+  - Left side joypad visualization (D-pad, A/B, Start/Select)
+  - Right side management panel with status, slot info, and action buttons
+- Emulator management hotkeys (pause, reset, save/load state, slot selection)
+- In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
 
 Known gaps:
 - No audio/APU emulation
-- No joypad input mapping yet
-- No sprite/OAM rendering yet (background/window only)
+- OAM corruption behavior is only partially accurate (`blargg/oam_bug` still has failing subtests)
 - `STOP` instruction behavior is stubbed
 - MBC3 RTC latch/register behavior is not implemented
 
@@ -57,6 +62,28 @@ CLI options:
 - `-s`, `--steps <COUNT>`: stop after a maximum number of steps
 - `-b`, `--breakpoint <ADDR>`: stop when `PC == ADDR`
 - `--headless`: run without graphics
+
+Controls (default):
+- D-pad: Arrow keys
+- A: `X` or `A`
+- B: `Z` or `S`
+- Start: `Enter`, keypad `Enter`, or `Space`
+- Select: `Backspace` or `Tab`
+- Mouse: click the on-screen joypad/buttons in the side panels
+
+Management hotkeys (SDL mode):
+- `P`: pause/resume emulation
+- `R`: reset emulator
+- `F5`: save state to active slot
+- `F9`: load state from active slot
+- `[ / ]`: previous/next save slot
+- `F1`: toggle side panel visibility
+- `Esc`: quit
+- Mouse: click `PAUSE`, `RESET`, `SAVE`, `LOAD`, and slot buttons in the right panel
+
+Save state notes:
+- Save states are currently in-memory only (session-local, not persisted to disk).
+- 10 slots are available (`0-9`), managed with `[ / ]`.
 
 ## Tests
 
