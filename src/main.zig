@@ -27,6 +27,8 @@ const help_text =
     \\  R       : Reset emulator
     \\  F5/F9   : Save/load state for active slot
     \\  [ / ]   : Previous/next save slot
+    \\  C       : Cycle display palette
+    \\  F11     : Toggle fullscreen
     \\  Esc     : Quit
     \\
     \\Examples:

@@ -6,6 +6,13 @@ pub const Window = opaque {};
 pub const Renderer = opaque {};
 pub const Texture = opaque {};
 
+pub const Rect = extern struct {
+    x: c_int,
+    y: c_int,
+    w: c_int,
+    h: c_int,
+};
+
 // SDL Event (simplified - 56 bytes to match SDL2's union size)
 pub const Event = extern struct {
     type: u32,
@@ -24,6 +31,8 @@ pub const INIT_AUDIO: u32 = 0x00000010;
 // Window flags
 pub const WINDOW_SHOWN: u32 = 0x00000004;
 pub const WINDOW_RESIZABLE: u32 = 0x00000020;
+pub const WINDOW_ALLOW_HIGHDPI: u32 = 0x00002000;
+pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x00001001;
 
 // Renderer flags
 pub const RENDERER_ACCELERATED: u32 = 0x00000002;
@@ -47,9 +56,13 @@ extern fn SDL_GetError() [*:0]const u8;
 extern fn SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: u32) ?*Window;
 extern fn SDL_DestroyWindow(window: *Window) void;
 extern fn SDL_SetWindowTitle(window: *Window, title: [*:0]const u8) void;
+extern fn SDL_SetWindowMinimumSize(window: *Window, min_w: c_int, min_h: c_int) void;
+extern fn SDL_SetWindowFullscreen(window: *Window, flags: u32) c_int;
 
 extern fn SDL_CreateRenderer(window: *Window, index: c_int, flags: u32) ?*Renderer;
 extern fn SDL_DestroyRenderer(renderer: *Renderer) void;
+extern fn SDL_RenderSetLogicalSize(renderer: *Renderer, w: c_int, h: c_int) c_int;
+extern fn SDL_SetRenderDrawColor(renderer: *Renderer, r: u8, g: u8, b: u8, a: u8) c_int;
 
 extern fn SDL_CreateTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, h: c_int) ?*Texture;
 extern fn SDL_DestroyTexture(texture: *Texture) void;
@@ -61,6 +74,7 @@ extern fn SDL_RenderClear(renderer: *Renderer) c_int;
 extern fn SDL_PollEvent(event: *Event) c_int;
 extern fn SDL_GetKeyboardState(numkeys: ?*c_int) [*c]const u8;
 extern fn SDL_PumpEvents() void;
+extern fn SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) c_int;
 
 // Keyboard scancodes we map to DMG controls
 pub const SCANCODE_X: usize = 27; // A
@@ -83,6 +97,8 @@ pub const SCANCODE_LEFTBRACKET: usize = 47;
 pub const SCANCODE_RIGHTBRACKET: usize = 48;
 pub const SCANCODE_F5: usize = 62;
 pub const SCANCODE_F9: usize = 66;
+pub const SCANCODE_F11: usize = 68;
+pub const SCANCODE_C: usize = 6;
 
 // Zig-friendly wrappers
 pub fn init(flags: u32) !void {
@@ -111,12 +127,31 @@ pub fn setWindowTitle(window: *Window, title: [:0]const u8) void {
     SDL_SetWindowTitle(window, title.ptr);
 }
 
+pub fn setWindowMinimumSize(window: *Window, width: c_int, height: c_int) void {
+    SDL_SetWindowMinimumSize(window, width, height);
+}
+
+pub fn setWindowFullscreen(window: *Window, fullscreen: bool) !void {
+    const flags: u32 = if (fullscreen) WINDOW_FULLSCREEN_DESKTOP else 0;
+    if (SDL_SetWindowFullscreen(window, flags) < 0) return error.SdlFullscreenFailed;
+}
+
 pub fn createRenderer(window: *Window, index: c_int, flags: u32) !*Renderer {
     return SDL_CreateRenderer(window, index, flags) orelse error.SdlRendererCreationFailed;
 }
 
 pub fn destroyRenderer(renderer: *Renderer) void {
     SDL_DestroyRenderer(renderer);
+}
+
+pub fn setLogicalSize(renderer: *Renderer, width: c_int, height: c_int) !void {
+    if (SDL_RenderSetLogicalSize(renderer, width, height) < 0) return error.SdlLogicalSizeFailed;
+}
+
+pub fn setRenderDrawColor(renderer: *Renderer, red: u8, green: u8, blue: u8, alpha: u8) !void {
+    if (SDL_SetRenderDrawColor(renderer, red, green, blue, alpha) < 0) {
+        return error.SdlRenderColorFailed;
+    }
 }
 
 pub fn createTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, h: c_int) !*Texture {
@@ -162,4 +197,8 @@ pub fn getKeyboardState() []const u8 {
     const ptr = SDL_GetKeyboardState(&key_count);
     if (ptr == null or key_count <= 0) return &[_]u8{};
     return ptr[0..@intCast(key_count)];
+}
+
+pub fn setHint(name: [:0]const u8, value: [:0]const u8) bool {
+    return SDL_SetHint(name.ptr, value.ptr) != 0;
 }

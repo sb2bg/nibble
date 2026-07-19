@@ -82,6 +82,7 @@ pub const Emulator = struct {
     status_message_len: usize = 0,
     save_slots: [SAVE_SLOT_COUNT]?SaveState = [_]?SaveState{null} ** SAVE_SLOT_COUNT,
     last_ui_redraw_ns: i96 = 0,
+    next_frame_deadline_ns: i96 = 0,
 
     /// Initialize the emulator with a ROM file
     pub fn init(allocator: Allocator, io: std.Io, rom_path: []const u8, options: EmulatorOptions) !Emulator {
@@ -123,6 +124,7 @@ pub const Emulator = struct {
         self.running = true;
         self.paused = false;
         self.last_ui_redraw_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        self.next_frame_deadline_ns = 0;
         if (self.status_message_len == 0) {
             self.setStatusMessage("READY");
         }
@@ -140,15 +142,23 @@ pub const Emulator = struct {
         self.syncUiStatus();
 
         while (self.running) {
-            // Check UI events and hotkeys
-            const actions: frontend_mod.UiActions = if (self.frontend) |*frontend|
-                frontend.pollEvents(&self.bus)
+            // Polling SDL for every CPU instruction was a significant host-side
+            // hot path. A 256-instruction cadence is still well below a frame;
+            // paused execution polls every loop so management keys stay live.
+            const should_poll_frontend = self.paused or (self.steps & 0xFF) == 0;
+            const actions: frontend_mod.UiActions = if (should_poll_frontend and self.frontend != null)
+                self.frontend.?.pollEvents(&self.bus)
             else
                 .{};
             if (actions.quit) break;
-            self.handleUiActions(actions);
-            self.syncUiStatus();
-            self.maybeRedrawUi();
+            if (should_poll_frontend) {
+                self.handleUiActions(actions);
+                self.syncUiStatus();
+                if (actions.redraw) {
+                    if (self.frontend) |*frontend| frontend.present(&self.ppu.frame_buffer);
+                }
+                self.maybeRedrawUi();
+            }
 
             if (self.paused) {
                 std.Io.sleep(self.io, .fromMilliseconds(8), .awake) catch {};
@@ -234,7 +244,10 @@ pub const Emulator = struct {
 
         self.ppu.tick(cycles, &self.bus);
         if (self.ppu.takeFrameReady()) {
-            if (self.frontend) |*frontend| frontend.present(&self.ppu.frame_buffer);
+            if (self.frontend) |*frontend| {
+                frontend.present(&self.ppu.frame_buffer);
+                self.paceFrame();
+            }
         }
 
         self.bus.tickTimer(cycles);
@@ -243,12 +256,39 @@ pub const Emulator = struct {
     }
 
     fn maybeRedrawUi(self: *Emulator) void {
+        if (!self.paused) return;
         const frontend = if (self.frontend) |*active| active else return;
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
             frontend.redraw(&self.ppu.frame_buffer);
             self.last_ui_redraw_ns = now;
         }
+    }
+
+    /// SDL's vsync may be absent, disabled by the driver, or target a 120 Hz
+    /// display. Pace against the DMG's 70,224-dot frame instead of assuming a
+    /// host refresh rate. Large host stalls resynchronize rather than trying to
+    /// run a burst of catch-up frames.
+    fn paceFrame(self: *Emulator) void {
+        const frame_ns: i96 = (70_224 * std.time.ns_per_s) / 4_194_304;
+        var now = std.Io.Clock.awake.now(self.io).nanoseconds;
+
+        if (self.next_frame_deadline_ns == 0) {
+            self.next_frame_deadline_ns = now + frame_ns;
+            return;
+        }
+
+        if (now < self.next_frame_deadline_ns) {
+            std.Io.sleep(
+                self.io,
+                .fromNanoseconds(self.next_frame_deadline_ns - now),
+                .awake,
+            ) catch {};
+            now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        }
+
+        const next = self.next_frame_deadline_ns + frame_ns;
+        self.next_frame_deadline_ns = if (now > next + frame_ns) now + frame_ns else next;
     }
 
     fn handleUiActions(self: *Emulator, actions: frontend_mod.UiActions) void {
@@ -426,6 +466,7 @@ pub const Emulator = struct {
         self.cpu.reset();
         self.bus.reset();
         self.ppu.reset();
+        self.next_frame_deadline_ns = 0;
         self.steps = 0;
         self.paused = false;
         self.running = false;

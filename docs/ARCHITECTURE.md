@@ -23,8 +23,9 @@ same amount.
   window-line state, and the logical DMG frame buffer. It emits a frame-ready
   edge but has no dependency on SDL or host input.
 - `SdlFrontend` owns the host window, texture conversion, keyboard mapping, and
-  management UI. It is optional; graphical and headless runs execute the same
-  PPU core.
+  management UI. It also owns presentation-only choices such as scaling,
+  fullscreen state, and color themes. It is optional; graphical and headless
+  runs execute the same PPU core.
 
 Save states snapshot component-owned state, while immutable ROM data and owned
 allocations remain in place. Any newly persistent hardware field should be added

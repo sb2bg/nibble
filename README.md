@@ -15,7 +15,7 @@ Implemented core pieces:
 - Deterministic MBC3 real-time clock registers and latching
 - SDL2 window output (with automatic headless fallback if SDL init fails)
 - Joypad input mapping + joypad interrupt signaling
-- Minimal SDL frontend focused on the 160x144 game screen
+- Resizable, high-DPI frontend with frame pacing, palette themes, and fullscreen
 - Emulator management hotkeys (pause, reset, save/load state, slot selection)
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
@@ -77,6 +77,8 @@ Management hotkeys (SDL mode):
 - `F5`: save state to active slot
 - `F9`: load state from active slot
 - `[ / ]`: previous/next save slot
+- `C`: cycle Classic, Pocket, Mono, and Amber palettes
+- `F11`: toggle fullscreen
 - `Esc`: quit
 - Window title: shows run/pause state, active slot, and the last status message
 

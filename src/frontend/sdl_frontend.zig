@@ -6,6 +6,22 @@ const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
 const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
 
 const WINDOW_SCALE = 3;
+const VIEWPORT_X = 16;
+const VIEWPORT_Y = 12;
+const LOGICAL_WIDTH = SCREEN_WIDTH + VIEWPORT_X * 2;
+const LOGICAL_HEIGHT = SCREEN_HEIGHT + VIEWPORT_Y * 2;
+
+const Palette = struct {
+    name: []const u8,
+    colors: [4]u32,
+};
+
+const palettes = [_]Palette{
+    .{ .name = "Classic", .colors = .{ 0xE0F8D0, 0x88C070, 0x346856, 0x081820 } },
+    .{ .name = "Pocket", .colors = .{ 0xF8F8E8, 0xB8B8A0, 0x686858, 0x181810 } },
+    .{ .name = "Mono", .colors = .{ 0xF4F4F4, 0xAAAAAA, 0x555555, 0x101010 } },
+    .{ .name = "Amber", .colors = .{ 0xFFF1B8, 0xD99B42, 0x8A4B20, 0x26150D } },
+};
 
 pub const UiActions = struct {
     quit: bool = false,
@@ -15,6 +31,7 @@ pub const UiActions = struct {
     load_state: bool = false,
     prev_slot: bool = false,
     next_slot: bool = false,
+    redraw: bool = false,
 };
 
 /// SDL owns host presentation and input. It deliberately has no authority
@@ -37,6 +54,10 @@ pub const SdlFrontend = struct {
     prev_prev_slot_key: bool = false,
     prev_next_slot_key: bool = false,
     prev_quit_key: bool = false,
+    prev_palette_key: bool = false,
+    prev_fullscreen_key: bool = false,
+    palette_index: usize = 0,
+    fullscreen: bool = false,
 
     pub fn init() !SdlFrontend {
         sdl.init(sdl.INIT_VIDEO) catch {
@@ -45,24 +66,33 @@ pub const SdlFrontend = struct {
         };
         errdefer sdl.quit();
 
+        _ = sdl.setHint("SDL_RENDER_SCALE_QUALITY", "nearest");
+
         const window = sdl.createWindow(
             "Nibble",
             sdl.WINDOWPOS_CENTERED,
             sdl.WINDOWPOS_CENTERED,
-            SCREEN_WIDTH * WINDOW_SCALE,
-            SCREEN_HEIGHT * WINDOW_SCALE,
-            sdl.WINDOW_SHOWN,
+            LOGICAL_WIDTH * WINDOW_SCALE,
+            LOGICAL_HEIGHT * WINDOW_SCALE,
+            sdl.WINDOW_SHOWN | sdl.WINDOW_RESIZABLE | sdl.WINDOW_ALLOW_HIGHDPI,
         ) catch {
             std.debug.print("SDL_CreateWindow Error: {s}\n", .{sdl.getError()});
             return error.SdlWindowFailed;
         };
         errdefer sdl.destroyWindow(window);
+        sdl.setWindowMinimumSize(window, LOGICAL_WIDTH * 2, LOGICAL_HEIGHT * 2);
 
-        const renderer = sdl.createRenderer(window, -1, sdl.RENDERER_ACCELERATED) catch {
+        const renderer = sdl.createRenderer(
+            window,
+            -1,
+            sdl.RENDERER_ACCELERATED | sdl.RENDERER_PRESENTVSYNC,
+        ) catch sdl.createRenderer(window, -1, sdl.RENDERER_ACCELERATED) catch {
             std.debug.print("SDL_CreateRenderer Error: {s}\n", .{sdl.getError()});
             return error.SdlRendererFailed;
         };
         errdefer sdl.destroyRenderer(renderer);
+        try sdl.setLogicalSize(renderer, LOGICAL_WIDTH, LOGICAL_HEIGHT);
+        try sdl.setRenderDrawColor(renderer, 0x0B, 0x0F, 0x12, 0xFF);
 
         const texture = sdl.createTexture(
             renderer,
@@ -98,7 +128,7 @@ pub const SdlFrontend = struct {
         for (0..SCREEN_HEIGHT) |y| {
             for (0..SCREEN_WIDTH) |x| {
                 const offset = (y * SCREEN_WIDTH + x) * 4;
-                const rgb = toRgb(frame[y][x]);
+                const rgb = self.toRgb(frame[y][x]);
                 pixels[offset + 0] = @intCast((rgb >> 16) & 0xFF);
                 pixels[offset + 1] = @intCast((rgb >> 8) & 0xFF);
                 pixels[offset + 2] = @intCast(rgb & 0xFF);
@@ -108,7 +138,13 @@ pub const SdlFrontend = struct {
 
         sdl.updateTexture(self.texture, null, pixels[0..], SCREEN_WIDTH * 4) catch {};
         sdl.renderClear(self.renderer) catch {};
-        sdl.renderCopy(self.renderer, self.texture, null, null) catch {};
+        const viewport: sdl.Rect = .{
+            .x = VIEWPORT_X,
+            .y = VIEWPORT_Y,
+            .w = SCREEN_WIDTH,
+            .h = SCREEN_HEIGHT,
+        };
+        sdl.renderCopy(self.renderer, self.texture, null, &viewport) catch {};
         sdl.renderPresent(self.renderer);
     }
 
@@ -144,6 +180,18 @@ pub const SdlFrontend = struct {
             actions.load_state = edgePressed(&self.prev_load_key, isPressed(keys, sdl.SCANCODE_F9));
             actions.prev_slot = edgePressed(&self.prev_prev_slot_key, isPressed(keys, sdl.SCANCODE_LEFTBRACKET));
             actions.next_slot = edgePressed(&self.prev_next_slot_key, isPressed(keys, sdl.SCANCODE_RIGHTBRACKET));
+
+            if (edgePressed(&self.prev_palette_key, isPressed(keys, sdl.SCANCODE_C))) {
+                self.palette_index = (self.palette_index + 1) % palettes.len;
+                self.refreshWindowTitle();
+                actions.redraw = true;
+            }
+            if (edgePressed(&self.prev_fullscreen_key, isPressed(keys, sdl.SCANCODE_F11))) {
+                const next = !self.fullscreen;
+                if (sdl.setWindowFullscreen(self.window, next)) |_| {
+                    self.fullscreen = next;
+                } else |_| {}
+            }
         } else {
             self.prev_quit_key = false;
             self.prev_pause_key = false;
@@ -152,6 +200,8 @@ pub const SdlFrontend = struct {
             self.prev_load_key = false;
             self.prev_prev_slot_key = false;
             self.prev_next_slot_key = false;
+            self.prev_palette_key = false;
+            self.prev_fullscreen_key = false;
         }
 
         return actions;
@@ -164,10 +214,19 @@ pub const SdlFrontend = struct {
         slot_has_state: bool,
         message: []const u8,
     ) void {
+        const message_len = @min(message.len, self.ui_message.len);
+        if (self.ui_paused == paused and
+            self.ui_slot == slot and
+            self.ui_slot_has_state == slot_has_state and
+            std.mem.eql(u8, self.ui_message[0..self.ui_message_len], message[0..message_len]))
+        {
+            return;
+        }
+
         self.ui_paused = paused;
         self.ui_slot = slot;
         self.ui_slot_has_state = slot_has_state;
-        self.ui_message_len = @min(message.len, self.ui_message.len);
+        self.ui_message_len = message_len;
         if (self.ui_message_len > 0) {
             @memcpy(self.ui_message[0..self.ui_message_len], message[0..self.ui_message_len]);
         }
@@ -186,14 +245,14 @@ pub const SdlFrontend = struct {
         const title = if (self.ui_message_len > 0)
             std.fmt.bufPrintZ(
                 &title_buf,
-                "Nibble | {s} | Slot {d} {s} | {s}",
-                .{ state, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
+                "Nibble | {s} | {s} | Slot {d} {s} | {s}",
+                .{ state, palettes[self.palette_index].name, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
             ) catch "Nibble"
         else
             std.fmt.bufPrintZ(
                 &title_buf,
-                "Nibble | {s} | Slot {d} {s}",
-                .{ state, self.ui_slot, slot_state },
+                "Nibble | {s} | {s} | Slot {d} {s}",
+                .{ state, palettes[self.palette_index].name, self.ui_slot, slot_state },
             ) catch "Nibble";
 
         sdl.setWindowTitle(self.window, title);
@@ -209,12 +268,7 @@ pub const SdlFrontend = struct {
         return scancode < keys.len and keys[scancode] != 0;
     }
 
-    fn toRgb(color: DmgColor) u32 {
-        return switch (color) {
-            .White => 0xE0F8D0,
-            .LightGray => 0x88C070,
-            .DarkGray => 0x346856,
-            .Black => 0x081820,
-        };
+    fn toRgb(self: *const SdlFrontend, color: DmgColor) u32 {
+        return palettes[self.palette_index].colors[@intFromEnum(color)];
     }
 };
