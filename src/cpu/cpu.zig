@@ -227,6 +227,14 @@ pub const Cpu = struct {
         bus.write(self.sp, @truncate(val));
     }
 
+    /// PUSH, RST, and taken CALL spend one internal M-cycle before their two
+    /// stack writes. Keeping this outside `push` matters because interrupt
+    /// dispatch has its own wait-state sequence.
+    fn pushAfterInternalCycle(self: *Cpu, val: u16, bus: *Bus) void {
+        bus.tickInternal(4);
+        self.push(val, bus);
+    }
+
     pub fn pop(self: *Cpu, bus: *const Bus) u16 {
         @constCast(bus).triggerOamBugReadIncDec(self.sp);
         const lo = bus.read(self.sp);
@@ -505,7 +513,7 @@ pub const Cpu = struct {
                 break :blk 20;
             },
             .push_rr => |reg| blk: {
-                self.push(self.readReg16(reg), bus);
+                self.pushAfterInternalCycle(self.readReg16(reg), bus);
                 break :blk 16;
             },
             .pop_rr => |reg| blk: {
@@ -736,13 +744,13 @@ pub const Cpu = struct {
 
             // Calls and returns
             .call => |addr| blk: {
-                self.push(self.pc, bus);
+                self.pushAfterInternalCycle(self.pc, bus);
                 self.pc = addr;
                 break :blk 24;
             },
             .call_cc => |args| blk: {
                 if (self.checkCondition(args.cond)) {
-                    self.push(self.pc, bus);
+                    self.pushAfterInternalCycle(self.pc, bus);
                     self.pc = args.addr;
                     break :blk 24;
                 }
@@ -766,7 +774,7 @@ pub const Cpu = struct {
                 break :blk 16;
             },
             .rst => |vec| blk: {
-                self.push(self.pc, bus);
+                self.pushAfterInternalCycle(self.pc, bus);
                 self.pc = @as(u16, vec) * 8;
                 break :blk 16;
             },
