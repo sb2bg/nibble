@@ -53,6 +53,7 @@ const IoState = struct {
     ppu_vram_read_blocked: bool,
     ppu_vram_write_blocked: bool,
     stat_irq_line: bool,
+    stat_mode0_suppressed: bool,
 };
 
 const BusState = struct {
@@ -279,6 +280,7 @@ pub const Emulator = struct {
             self.bus.io.setLy(0);
             self.bus.io.setPpuMode(0);
             self.bus.io.setPpuMemoryBlocked(false, false);
+            self.bus.io.releaseMode0Stat();
         }
 
         self.ppu.tick(cycles, &self.bus);
@@ -458,6 +460,7 @@ pub const Emulator = struct {
                 .ppu_vram_read_blocked = self.bus.io.ppu_vram_read_blocked,
                 .ppu_vram_write_blocked = self.bus.io.ppu_vram_write_blocked,
                 .stat_irq_line = self.bus.io.stat_irq_line,
+                .stat_mode0_suppressed = self.bus.io.stat_mode0_suppressed,
             },
             .ie_register = self.bus.ie_register,
             .timer = self.bus.timer,
@@ -490,6 +493,7 @@ pub const Emulator = struct {
         self.bus.io.ppu_vram_read_blocked = state.io.ppu_vram_read_blocked;
         self.bus.io.ppu_vram_write_blocked = state.io.ppu_vram_write_blocked;
         self.bus.io.stat_irq_line = state.io.stat_irq_line;
+        self.bus.io.stat_mode0_suppressed = state.io.stat_mode0_suppressed;
         self.bus.io.serial_output.clearRetainingCapacity();
 
         self.bus.ie_register = state.ie_register;

@@ -44,6 +44,7 @@ pub const Ppu = struct {
     frame_ready: bool,
     lcd_startup: bool,
     line_start_delay: u8,
+    mode0_stat_delay: u8,
 
     // Mode 3 pipeline state. These fields are intentionally persistent so a
     // save state taken mid-scanline resumes the same fetch/pop sequence.
@@ -73,6 +74,7 @@ pub const Ppu = struct {
             .frame_ready = false,
             .lcd_startup = false,
             .line_start_delay = 0,
+            .mode0_stat_delay = 0,
             .fetcher = .{},
             .pixel_x = 0,
             .startup_dots = 0,
@@ -99,6 +101,7 @@ pub const Ppu = struct {
         self.frame_ready = true;
         self.lcd_startup = false;
         self.line_start_delay = 0;
+        self.mode0_stat_delay = 0;
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.startup_dots = 0;
@@ -165,6 +168,11 @@ pub const Ppu = struct {
             },
             .PixelTransfer => self.tickPixelTransfer(bus),
             .HBlank => {
+                if (self.mode0_stat_delay > 0) {
+                    self.mode0_stat_delay -= 1;
+                    if (self.mode0_stat_delay == 0) bus.io.releaseMode0Stat();
+                }
+
                 // A DMG starts LCD line 0 in mode 0, skips its OAM scan, and
                 // enters mode 3 after 82 dots. This startup phase is distinct
                 // from the HBlank at the end of a rendered line.
@@ -318,6 +326,13 @@ pub const Ppu = struct {
             self.mode3_duration = @intCast(@min(self.mode_cycles, 376));
             if (self.window_drew_line) self.window_line +%= 1;
             self.mode_cycles = 0;
+            const fine_scroll = bus.io.getScx() & 0x07;
+            self.mode0_stat_delay = switch (fine_scroll) {
+                1, 5 => 2,
+                2, 6 => 1,
+                else => 0,
+            };
+            if (self.mode0_stat_delay > 0) bus.io.suppressMode0Stat();
             self.setMode(.HBlank, bus);
         }
     }
@@ -495,6 +510,7 @@ pub const Ppu = struct {
             self.window_line = 0;
             self.lcd_startup = false;
             self.line_start_delay = 0;
+            self.mode0_stat_delay = 0;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
@@ -506,6 +522,7 @@ pub const Ppu = struct {
             self.window_line = 0;
             self.lcd_startup = true;
             self.line_start_delay = 0;
+            self.mode0_stat_delay = 0;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();

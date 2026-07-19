@@ -109,6 +109,7 @@ pub const IoRegisters = struct {
     // Tracking the previous level prevents duplicate interrupts when two
     // sources overlap (commonly called STAT blocking).
     stat_irq_line: bool,
+    stat_mode0_suppressed: bool,
 
     // Serial output (for test ROMs)
     allocator: std.mem.Allocator,
@@ -125,6 +126,7 @@ pub const IoRegisters = struct {
             .ppu_vram_read_blocked = false,
             .ppu_vram_write_blocked = false,
             .stat_irq_line = false,
+            .stat_mode0_suppressed = false,
             .allocator = allocator,
             .serial_output = .empty,
         };
@@ -415,8 +417,18 @@ pub const IoRegisters = struct {
     }
 
     pub fn setPpuMode(self: *IoRegisters, mode: u2) void {
+        if (mode != 0) self.stat_mode0_suppressed = false;
         self.data[@intFromEnum(IoReg.STAT)] =
             (self.data[@intFromEnum(IoReg.STAT)] & 0xFC) | mode | 0x80;
+        self.updateStatInterrupt();
+    }
+
+    pub fn suppressMode0Stat(self: *IoRegisters) void {
+        self.stat_mode0_suppressed = true;
+    }
+
+    pub fn releaseMode0Stat(self: *IoRegisters) void {
+        self.stat_mode0_suppressed = false;
         self.updateStatInterrupt();
     }
 
@@ -449,7 +461,7 @@ pub const IoRegisters = struct {
         const line_high = ((stat & 0x40) != 0 and (stat & 0x04) != 0) or
             (lcd_enabled and (((stat & 0x20) != 0 and mode == 2) or
                 ((stat & 0x10) != 0 and mode == 1) or
-                ((stat & 0x08) != 0 and mode == 0)));
+                ((stat & 0x08) != 0 and mode == 0 and !self.stat_mode0_suppressed)));
 
         if (line_high and !self.stat_irq_line) {
             self.requestInterrupt(Interrupt.LCD_STAT);
@@ -570,6 +582,21 @@ test "mode 2 STAT source rises before the public mode changes" {
     io.clearInterrupt(Interrupt.LCD_STAT);
     io.setPpuMode(2);
     try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT);
+}
+
+test "mode 0 STAT source can wait for the CPU sampling phase" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.write(@intFromEnum(IoReg.STAT), 0x08);
+    io.setPpuMode(3);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.suppressMode0Stat();
+    io.setPpuMode(0);
+    try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT);
+
+    io.releaseMode0Stat();
+    try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT) != 0);
 }
 
 test "joypad interrupt follows selected input lines" {
