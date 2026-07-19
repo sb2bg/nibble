@@ -144,6 +144,7 @@ pub const IoRegisters = struct {
 
     /// Read from I/O register (addr is 0x00-0x7F, relative to 0xFF00)
     pub fn read(self: *const IoRegisters, addr: u8) u8 {
+        if (isUnusedDmgRegister(addr)) return 0xFF;
         const reg: IoReg = @enumFromInt(addr);
         return switch (reg) {
             .JOYP => self.readJoypad(),
@@ -151,13 +152,19 @@ pub const IoRegisters = struct {
             .LY => self.data[addr], // Read-only PPU scanline
             .STAT => self.data[addr] | 0x80, // Bit 7 always set
             .IF => self.data[addr] | 0xE0, // Upper 3 bits always set
-            .KEY1 => self.data[addr] | 0x7E,
+            .NR10 => self.data[addr] | 0x80,
+            .NR30 => self.data[addr] | 0x7F,
+            .NR32 => self.data[addr] | 0x9F,
+            .NR41 => self.data[addr] | 0xC0,
+            .NR44 => self.data[addr] | 0x3F,
+            .NR52 => self.data[addr] | 0x70,
             else => self.data[addr],
         };
     }
 
     /// Write to I/O register (addr is 0x00-0x7F, relative to 0xFF00)
     pub fn write(self: *IoRegisters, addr: u8, val: u8) void {
+        if (isUnusedDmgRegister(addr)) return;
         const reg: IoReg = @enumFromInt(addr);
         switch (reg) {
             .JOYP => {
@@ -215,6 +222,15 @@ pub const IoRegisters = struct {
                 self.data[addr] = val;
             },
         }
+    }
+
+    fn isUnusedDmgRegister(addr: u8) bool {
+        return addr == 0x03 or
+            (addr >= 0x08 and addr <= 0x0E) or
+            addr == 0x15 or
+            addr == 0x1F or
+            (addr >= 0x27 and addr <= 0x29) or
+            addr >= 0x4C;
     }
 
     /// Read joypad register with proper button masking
@@ -376,6 +392,28 @@ pub const IoRegisters = struct {
         self.stat_irq_line = line_high;
     }
 };
+
+test "DMG unused IO bits and registers read high" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    for ([_]struct { addr: u8, mask: u8 }{
+        .{ .addr = @intFromEnum(IoReg.NR10), .mask = 0x80 },
+        .{ .addr = @intFromEnum(IoReg.NR30), .mask = 0x7F },
+        .{ .addr = @intFromEnum(IoReg.NR32), .mask = 0x9F },
+        .{ .addr = @intFromEnum(IoReg.NR41), .mask = 0xC0 },
+        .{ .addr = @intFromEnum(IoReg.NR44), .mask = 0x3F },
+        .{ .addr = @intFromEnum(IoReg.NR52), .mask = 0x70 },
+    }) |case| {
+        io.write(case.addr, 0);
+        try std.testing.expectEqual(case.mask, io.read(case.addr) & case.mask);
+    }
+
+    for ([_]u8{ 0x03, 0x08, 0x15, 0x1F, 0x27, 0x4C, 0x7F }) |addr| {
+        io.write(addr, 0);
+        try std.testing.expectEqual(@as(u8, 0xFF), io.read(addr));
+    }
+}
 
 test "LYC writes update coincidence and request STAT only on a rising edge" {
     var io = IoRegisters.init(std.testing.allocator);
