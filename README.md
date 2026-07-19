@@ -11,7 +11,7 @@ Implemented core pieces:
 - Memory bus with cartridge support and MBC banking (`ROM`, `MBC1`, `MBC2`, `MBC3`, `MBC5`)
 - Timer (`DIV/TIMA/TMA/TAC`)
 - Timed DMG OAM DMA and CPU bus lockout
-- PPU timing + background/window/sprite rendering
+- Dot-driven PPU timing with a background/window pixel FIFO and sprite mixing
 - Deterministic MBC3 real-time clock registers and latching
 - SDL2 window output (with automatic headless fallback if SDL init fails)
 - Joypad input mapping + joypad interrupt signaling
@@ -24,7 +24,7 @@ Known gaps:
 - No audio/APU emulation
 - OAM corruption behavior is only partially accurate (`blargg/oam_bug` still has failing subtests)
 - `STOP` instruction behavior is only partially modeled
-- PPU rendering is scanline-based rather than a dot-level pixel FIFO
+- Sprite pixels are mixed after the background line; a dedicated object FIFO is pending
 - Serial transfers complete immediately rather than at link-cable timing
 
 ## Requirements

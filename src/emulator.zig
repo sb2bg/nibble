@@ -9,10 +9,6 @@ const Timer = @import("timer.zig").Timer;
 const Mbc = @import("memory/mbc.zig").Mbc;
 const ppu_mod = @import("ppu/ppu.zig");
 const Ppu = ppu_mod.Ppu;
-const PpuMode = ppu_mod.PpuMode;
-const DmgColor = ppu_mod.DmgColor;
-const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
-const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
 const frontend_mod = @import("frontend/sdl_frontend.zig");
 const SdlFrontend = frontend_mod.SdlFrontend;
 
@@ -62,21 +58,10 @@ const BusState = struct {
     cart_ram: [MAX_CART_RAM_BYTES]u8,
 };
 
-const PpuState = struct {
-    frame_buffer: [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor,
-    mode: PpuMode,
-    mode_cycles: u32,
-    mode3_duration: u16,
-    ly: u8,
-    window_line: u8,
-    enabled: bool,
-    frame_ready: bool,
-};
-
 const SaveState = struct {
     cpu: CpuState,
     bus: BusState,
-    ppu: PpuState,
+    ppu: Ppu,
     steps: usize,
 };
 
@@ -334,16 +319,7 @@ pub const Emulator = struct {
                 .cycles = self.cpu.cycles,
             },
             .bus = self.captureBusState(),
-            .ppu = .{
-                .frame_buffer = self.ppu.frame_buffer,
-                .mode = self.ppu.mode,
-                .mode_cycles = self.ppu.mode_cycles,
-                .mode3_duration = self.ppu.mode3_duration,
-                .ly = self.ppu.ly,
-                .window_line = self.ppu.window_line,
-                .enabled = self.ppu.enabled,
-                .frame_ready = self.ppu.frame_ready,
-            },
+            .ppu = self.ppu,
             .steps = self.steps,
         };
 
@@ -375,14 +351,7 @@ pub const Emulator = struct {
 
         self.applyBusState(slot_state.bus);
 
-        self.ppu.frame_buffer = slot_state.ppu.frame_buffer;
-        self.ppu.mode = slot_state.ppu.mode;
-        self.ppu.mode_cycles = slot_state.ppu.mode_cycles;
-        self.ppu.mode3_duration = slot_state.ppu.mode3_duration;
-        self.ppu.ly = slot_state.ppu.ly;
-        self.ppu.window_line = slot_state.ppu.window_line;
-        self.ppu.enabled = slot_state.ppu.enabled;
-        self.ppu.frame_ready = slot_state.ppu.frame_ready;
+        self.ppu = slot_state.ppu;
         if (self.frontend) |*frontend| frontend.redraw(&self.ppu.frame_buffer);
 
         self.steps = slot_state.steps;

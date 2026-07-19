@@ -1,5 +1,6 @@
 const std = @import("std");
 const Interrupt = @import("../memory/io.zig").Interrupt;
+const fifo_mod = @import("fifo.zig");
 
 /// Game Boy screen dimensions
 pub const SCREEN_WIDTH = 160;
@@ -33,6 +34,17 @@ pub const Ppu = struct {
     enabled: bool,
     frame_ready: bool,
 
+    // Mode 3 pipeline state. These fields are intentionally persistent so a
+    // save state taken mid-scanline resumes the same fetch/pop sequence.
+    fetcher: fifo_mod.BackgroundFetcher,
+    pixel_x: u16,
+    startup_dots: u8,
+    discard_pixels: u8,
+    window_started: bool,
+    window_drew_line: bool,
+    bg_color_ids: [SCREEN_WIDTH]u2,
+    sprite_stalls: [SCREEN_WIDTH]u8,
+
     pub fn init() Ppu {
         return Ppu{
             .frame_buffer = [_][SCREEN_WIDTH]DmgColor{[_]DmgColor{.White} ** SCREEN_WIDTH} ** SCREEN_HEIGHT,
@@ -43,6 +55,14 @@ pub const Ppu = struct {
             .window_line = 0,
             .enabled = false,
             .frame_ready = false,
+            .fetcher = .{},
+            .pixel_x = 0,
+            .startup_dots = 0,
+            .discard_pixels = 0,
+            .window_started = false,
+            .window_drew_line = false,
+            .bg_color_ids = [_]u2{0} ** SCREEN_WIDTH,
+            .sprite_stalls = [_]u8{0} ** SCREEN_WIDTH,
         };
     }
 
@@ -54,6 +74,14 @@ pub const Ppu = struct {
         self.window_line = 0;
         self.enabled = false;
         self.frame_ready = true;
+        self.fetcher.reset(false);
+        self.pixel_x = 0;
+        self.startup_dots = 0;
+        self.discard_pixels = 0;
+        self.window_started = false;
+        self.window_drew_line = false;
+        @memset(&self.bg_color_ids, 0);
+        @memset(&self.sprite_stalls, 0);
         @memset(&self.frame_buffer, [_]DmgColor{.White} ** SCREEN_WIDTH);
     }
 
@@ -64,33 +92,23 @@ pub const Ppu = struct {
 
     pub fn tick(self: *Ppu, cycles: u32, bus: anytype) void {
         if (!self.enabled) return;
+        for (0..cycles) |_| self.tickDot(bus);
+    }
 
-        if (self.mode == .OamSearch) {
-            const row: u8 = @intCast(@min(self.mode_cycles / 4, 19));
-            bus.io.setOamScanRow(row);
-        }
-
-        self.mode_cycles += cycles;
+    fn tickDot(self: *Ppu, bus: anytype) void {
+        self.mode_cycles += 1;
 
         switch (self.mode) {
             .OamSearch => {
-                if (self.mode_cycles >= 80) {
-                    self.mode_cycles -= 80;
-                    self.mode3_duration = self.calculateMode3Duration(bus);
-                    self.setMode(.PixelTransfer, bus);
-                }
+                const row: u8 = @intCast(@min(self.mode_cycles / 4, 19));
+                bus.io.setOamScanRow(row);
+                if (self.mode_cycles == 80) self.beginPixelTransfer(bus);
             },
-            .PixelTransfer => {
-                if (self.mode_cycles >= self.mode3_duration) {
-                    self.mode_cycles -= self.mode3_duration;
-                    self.setMode(.HBlank, bus);
-                    if (self.renderScanline(bus)) self.window_line +%= 1;
-                }
-            },
+            .PixelTransfer => self.tickPixelTransfer(bus),
             .HBlank => {
-                const hblank_duration = 456 - 80 - @as(u32, self.mode3_duration);
+                const hblank_duration = 376 - @min(@as(u32, self.mode3_duration), 376);
                 if (self.mode_cycles >= hblank_duration) {
-                    self.mode_cycles -= hblank_duration;
+                    self.mode_cycles = 0;
                     self.ly += 1;
                     bus.io.setLy(self.ly);
 
@@ -104,8 +122,8 @@ pub const Ppu = struct {
                 }
             },
             .VBlank => {
-                if (self.mode_cycles >= 456) {
-                    self.mode_cycles -= 456;
+                if (self.mode_cycles == 456) {
+                    self.mode_cycles = 0;
                     self.ly += 1;
                     bus.io.setLy(self.ly);
 
@@ -120,204 +138,196 @@ pub const Ppu = struct {
         }
     }
 
-    /// Render a completed visible line. Returns whether the window actually
-    /// emitted pixels, which is what advances the hardware's window counter.
-    fn renderScanline(self: *Ppu, bus: anytype) bool {
-        if (self.ly >= SCREEN_HEIGHT) return false;
+    fn beginPixelTransfer(self: *Ppu, bus: anytype) void {
+        self.mode_cycles = 0;
+        self.pixel_x = 0;
+        self.startup_dots = 12;
+        self.discard_pixels = bus.io.getScx() & 0x07;
+        self.window_started = false;
+        self.window_drew_line = false;
+        @memset(&self.bg_color_ids, 0);
+        @memset(&self.sprite_stalls, 0);
+        self.fetcher.reset(false);
 
         const lcdc = bus.io.getLcdc();
-        const bg_enabled = (lcdc & 0x01) != 0;
-        const bgp = bus.io.getBgp();
-        var bg_color_ids: [SCREEN_WIDTH]u2 = [_]u2{0} ** SCREEN_WIDTH;
-
-        if (bg_enabled) {
-            const scy = bus.io.getScy();
-            const scx = bus.io.getScx();
-
-            const y = self.ly +% scy;
-            const tile_y = y / 8;
-            const pixel_y = y % 8;
-
-            for (0..SCREEN_WIDTH) |x| {
-                const scroll_x = @as(u8, @intCast(x)) +% scx;
-                const tile_x = scroll_x / 8;
-                const pixel_x = scroll_x % 8;
-
-                const tile_map_addr: u16 = if (lcdc & 0x08 != 0) 0x9C00 else 0x9800;
-                const tile_index = bus.readVram(tile_map_addr + @as(u16, tile_y) * 32 + tile_x);
-
-                const tile_data_addr: u16 = if (lcdc & 0x10 != 0)
-                    0x8000 + @as(u16, tile_index) * 16
-                else blk: {
-                    const signed_index: i32 = @as(i8, @bitCast(tile_index));
-                    const addr: i32 = 0x9000 + signed_index * 16;
-                    break :blk @intCast(addr);
-                };
-
-                const byte1 = bus.readVram(tile_data_addr + @as(u16, pixel_y) * 2);
-                const byte2 = bus.readVram(tile_data_addr + @as(u16, pixel_y) * 2 + 1);
-
-                const bit_pos: u3 = @intCast(7 - pixel_x);
-                const color_id: u2 = @intCast(
-                    (((byte2 >> bit_pos) & 1) << 1) | ((byte1 >> bit_pos) & 1),
-                );
-
-                const palette_shift: u3 = @as(u3, color_id) * 2;
-                const palette_color: DmgColor = @enumFromInt((bgp >> palette_shift) & 0x03);
-
-                self.frame_buffer[self.ly][x] = palette_color;
-                bg_color_ids[x] = color_id;
-            }
-        } else {
-            @memset(&self.frame_buffer[self.ly], .White);
+        if (self.isWindowVisible(bus) and bus.io.getWx() <= 7) {
+            self.fetcher.reset(true);
+            self.window_started = true;
+            self.discard_pixels = 7 - bus.io.getWx();
         }
 
-        const window_visible = self.isWindowVisible(bus);
-        if (window_visible) {
-            const wx = bus.io.getWx();
-            {
-                const window_y = self.window_line;
-                const window_tile_y = window_y / 8;
-                const window_pixel_y = window_y % 8;
-                const window_map_addr: u16 = if (lcdc & 0x40 != 0) 0x9C00 else 0x9800;
-
-                for (0..SCREEN_WIDTH) |x| {
-                    const screen_x = @as(u8, @intCast(x));
-                    const wx_adjusted: i16 = @as(i16, wx) - 7;
-
-                    if (@as(i16, screen_x) >= wx_adjusted) {
-                        const window_x: u8 = @intCast(@as(i16, screen_x) - wx_adjusted);
-                        const window_tile_x = window_x / 8;
-                        const window_pixel_x = window_x % 8;
-
-                        const tile_index = bus.readVram(window_map_addr + @as(u16, window_tile_y) * 32 + window_tile_x);
-                        const tile_data_addr: u16 = if (lcdc & 0x10 != 0)
-                            0x8000 + @as(u16, tile_index) * 16
-                        else blk: {
-                            const signed_index: i32 = @as(i8, @bitCast(tile_index));
-                            const addr: i32 = 0x9000 + signed_index * 16;
-                            break :blk @intCast(addr);
-                        };
-
-                        const byte1 = bus.readVram(tile_data_addr + @as(u16, window_pixel_y) * 2);
-                        const byte2 = bus.readVram(tile_data_addr + @as(u16, window_pixel_y) * 2 + 1);
-
-                        const bit_pos: u3 = @intCast(7 - window_pixel_x);
-                        const color_id: u2 = @intCast(
-                            (((byte2 >> bit_pos) & 1) << 1) | ((byte1 >> bit_pos) & 1),
-                        );
-
-                        const palette_shift: u3 = @as(u3, color_id) * 2;
-                        const palette_color: DmgColor = @enumFromInt((bgp >> palette_shift) & 0x03);
-
-                        self.frame_buffer[self.ly][x] = palette_color;
-                        bg_color_ids[x] = color_id;
-                    }
-                }
-            }
-        }
-
+        self.mode3_duration = 172 + @as(u16, bus.io.getScx() & 0x07);
+        if (self.isWindowVisible(bus)) self.mode3_duration += 6;
         if ((lcdc & 0x02) != 0) {
-            const sprite_height: u8 = if ((lcdc & 0x04) != 0) 16 else 8;
-            const obp0 = bus.io.getObp0();
-            const obp1 = bus.io.getObp1();
+            self.mode3_duration += self.collectSpritePenalties(
+                bus,
+                &self.sprite_stalls,
+                289 - self.mode3_duration,
+            );
+        }
+        self.setMode(.PixelTransfer, bus);
+    }
 
-            const Sprite = struct {
-                x: i16,
-                y: i16,
-                tile: u8,
-                attr: u8,
-                index: u8,
-            };
+    fn tickPixelTransfer(self: *Ppu, bus: anytype) void {
+        const lcdc = bus.io.getLcdc();
 
-            var scanline_sprites: [10]Sprite = undefined;
-            var sprite_count: usize = 0;
+        if (self.pixel_x < SCREEN_WIDTH and self.sprite_stalls[self.pixel_x] > 0) {
+            self.sprite_stalls[self.pixel_x] -= 1;
+            return;
+        }
 
-            var i: u8 = 0;
-            while (i < 40 and sprite_count < scanline_sprites.len) : (i += 1) {
-                const base: u16 = 0xFE00 + @as(u16, i) * 4;
-                const oam_y = bus.readOam(base);
-                const oam_x = bus.readOam(base + 1);
-                const tile = bus.readOam(base + 2);
-                const attr = bus.readOam(base + 3);
-
-                const sprite_y = @as(i16, oam_y) - 16;
-                const sprite_x = @as(i16, oam_x) - 8;
-                const line = @as(i16, self.ly) - sprite_y;
-                if (line < 0 or line >= @as(i16, sprite_height)) continue;
-
-                scanline_sprites[sprite_count] = .{
-                    .x = sprite_x,
-                    .y = sprite_y,
-                    .tile = tile,
-                    .attr = attr,
-                    .index = i,
-                };
-                sprite_count += 1;
-            }
-
-            for (0..SCREEN_WIDTH) |x| {
-                const screen_x: i16 = @intCast(x);
-
-                var best_found = false;
-                var best_sprite_x: i16 = 0;
-                var best_oam_index: u8 = 0;
-                var best_attr: u8 = 0;
-                var best_color_id: u2 = 0;
-
-                var si: usize = 0;
-                while (si < sprite_count) : (si += 1) {
-                    const spr = scanline_sprites[si];
-                    if (screen_x < spr.x or screen_x >= spr.x + 8) continue;
-
-                    var line = @as(i16, self.ly) - spr.y;
-                    if ((spr.attr & 0x40) != 0) {
-                        line = @as(i16, sprite_height) - 1 - line;
-                    }
-
-                    var pixel_x = screen_x - spr.x;
-                    if ((spr.attr & 0x20) != 0) {
-                        pixel_x = 7 - pixel_x;
-                    }
-
-                    var tile_num = spr.tile;
-                    if (sprite_height == 16) {
-                        tile_num &= 0xFE;
-                        if (line >= 8) {
-                            tile_num +%= 1;
-                            line -= 8;
-                        }
-                    }
-
-                    const tile_addr: u16 =
-                        0x8000 + @as(u16, tile_num) * 16 + @as(u16, @intCast(line)) * 2;
-                    const lo = bus.readVram(tile_addr);
-                    const hi = bus.readVram(tile_addr + 1);
-                    const pixel_x_u8: u8 = @intCast(pixel_x);
-                    const bit_pos: u3 = @intCast(7 - pixel_x_u8);
-                    const color_id: u2 = @intCast((((hi >> bit_pos) & 1) << 1) | ((lo >> bit_pos) & 1));
-                    if (color_id == 0) continue;
-
-                    if (!best_found or spr.x < best_sprite_x or (spr.x == best_sprite_x and spr.index < best_oam_index)) {
-                        best_found = true;
-                        best_sprite_x = spr.x;
-                        best_oam_index = spr.index;
-                        best_attr = spr.attr;
-                        best_color_id = color_id;
-                    }
-                }
-
-                if (!best_found) continue;
-                if ((best_attr & 0x80) != 0 and bg_color_ids[x] != 0) continue;
-
-                const palette = if ((best_attr & 0x10) != 0) obp1 else obp0;
-                const palette_shift: u3 = @as(u3, best_color_id) * 2;
-                const sprite_color: DmgColor = @enumFromInt((palette >> palette_shift) & 0x03);
-                self.frame_buffer[self.ly][x] = sprite_color;
+        if (!self.window_started and self.isWindowVisible(bus)) {
+            const window_start: u16 = if (bus.io.getWx() <= 7) 0 else bus.io.getWx() - 7;
+            if (self.pixel_x == window_start) {
+                self.fetcher.startWindow(bus, lcdc, self.window_line);
+                self.window_started = true;
             }
         }
 
-        return window_visible;
+        if (self.pixel_x < SCREEN_WIDTH) {
+            self.fetcher.tick(
+                bus,
+                lcdc,
+                self.ly,
+                bus.io.getScx(),
+                bus.io.getScy(),
+                self.window_line,
+            );
+
+            if (self.startup_dots > 0) {
+                self.startup_dots -= 1;
+            } else if (self.fetcher.fifo.pop()) |pixel| {
+                if (self.discard_pixels > 0) {
+                    self.discard_pixels -= 1;
+                } else {
+                    self.outputPixel(bus, pixel.color_id);
+                }
+            }
+        }
+
+        if (self.pixel_x >= SCREEN_WIDTH and self.mode_cycles >= self.mode3_duration) {
+            // A FIFO underflow may extend mode 3; keep the scanline total fixed
+            // by shortening HBlank by the same amount.
+            self.mode3_duration = @intCast(@min(self.mode_cycles, 376));
+            self.renderSprites(bus);
+            if (self.window_drew_line) self.window_line +%= 1;
+            self.mode_cycles = 0;
+            self.setMode(.HBlank, bus);
+        }
+    }
+
+    fn outputPixel(self: *Ppu, bus: anytype, fetched_color_id: u2) void {
+        const x: usize = @intCast(self.pixel_x);
+        const bg_enabled = (bus.io.getLcdc() & 0x01) != 0;
+        const color_id: u2 = if (bg_enabled) fetched_color_id else 0;
+        self.bg_color_ids[x] = color_id;
+
+        const shift: u3 = @as(u3, color_id) * 2;
+        self.frame_buffer[self.ly][x] = @enumFromInt((bus.io.getBgp() >> shift) & 0x03);
+        self.pixel_x += 1;
+        if (self.fetcher.using_window) self.window_drew_line = true;
+    }
+
+    /// Mix the selected DMG objects over the background pixels already emitted
+    /// by the FIFO. Object fetching itself is still represented by dot stalls;
+    /// a dedicated object FIFO is the next fidelity boundary.
+    fn renderSprites(self: *Ppu, bus: anytype) void {
+        if (self.ly >= SCREEN_HEIGHT) return;
+
+        const lcdc = bus.io.getLcdc();
+        if ((lcdc & 0x02) == 0) return;
+
+        const sprite_height: u8 = if ((lcdc & 0x04) != 0) 16 else 8;
+        const obp0 = bus.io.getObp0();
+        const obp1 = bus.io.getObp1();
+
+        const Sprite = struct {
+            x: i16,
+            y: i16,
+            tile: u8,
+            attr: u8,
+            index: u8,
+        };
+
+        var scanline_sprites: [10]Sprite = undefined;
+        var sprite_count: usize = 0;
+
+        var i: u8 = 0;
+        while (i < 40 and sprite_count < scanline_sprites.len) : (i += 1) {
+            const base: u16 = 0xFE00 + @as(u16, i) * 4;
+            const oam_y = bus.readOam(base);
+            const oam_x = bus.readOam(base + 1);
+            const tile = bus.readOam(base + 2);
+            const attr = bus.readOam(base + 3);
+
+            const sprite_y = @as(i16, oam_y) - 16;
+            const sprite_x = @as(i16, oam_x) - 8;
+            const line = @as(i16, self.ly) - sprite_y;
+            if (line < 0 or line >= @as(i16, sprite_height)) continue;
+
+            scanline_sprites[sprite_count] = .{
+                .x = sprite_x,
+                .y = sprite_y,
+                .tile = tile,
+                .attr = attr,
+                .index = i,
+            };
+            sprite_count += 1;
+        }
+
+        for (0..SCREEN_WIDTH) |x| {
+            const screen_x: i16 = @intCast(x);
+
+            var best_found = false;
+            var best_sprite_x: i16 = 0;
+            var best_oam_index: u8 = 0;
+            var best_attr: u8 = 0;
+            var best_color_id: u2 = 0;
+
+            for (scanline_sprites[0..sprite_count]) |sprite| {
+                if (screen_x < sprite.x or screen_x >= sprite.x + 8) continue;
+
+                var line = @as(i16, self.ly) - sprite.y;
+                if ((sprite.attr & 0x40) != 0) line = @as(i16, sprite_height) - 1 - line;
+
+                var sprite_x = screen_x - sprite.x;
+                if ((sprite.attr & 0x20) != 0) sprite_x = 7 - sprite_x;
+
+                var tile_num = sprite.tile;
+                if (sprite_height == 16) {
+                    tile_num &= 0xFE;
+                    if (line >= 8) {
+                        tile_num +%= 1;
+                        line -= 8;
+                    }
+                }
+
+                const tile_addr: u16 =
+                    0x8000 + @as(u16, tile_num) * 16 + @as(u16, @intCast(line)) * 2;
+                const low = bus.readVram(tile_addr);
+                const high = bus.readVram(tile_addr + 1);
+                const bit: u3 = @intCast(7 - @as(u8, @intCast(sprite_x)));
+                const color_id: u2 = @intCast((((high >> bit) & 1) << 1) | ((low >> bit) & 1));
+                if (color_id == 0) continue;
+
+                if (!best_found or sprite.x < best_sprite_x or
+                    (sprite.x == best_sprite_x and sprite.index < best_oam_index))
+                {
+                    best_found = true;
+                    best_sprite_x = sprite.x;
+                    best_oam_index = sprite.index;
+                    best_attr = sprite.attr;
+                    best_color_id = color_id;
+                }
+            }
+
+            if (!best_found) continue;
+            if ((best_attr & 0x80) != 0 and self.bg_color_ids[x] != 0) continue;
+
+            const palette = if ((best_attr & 0x10) != 0) obp1 else obp0;
+            const shift: u3 = @as(u3, best_color_id) * 2;
+            self.frame_buffer[self.ly][x] = @enumFromInt((palette >> shift) & 0x03);
+        }
     }
 
     fn isWindowVisible(self: *const Ppu, bus: anytype) bool {
@@ -327,15 +337,26 @@ pub const Ppu = struct {
             bus.io.getWx() <= 166;
     }
 
-    /// Mode 3 starts at 172 dots, then stalls for fine scrolling, window
-    /// startup, and object fetches. This models the documented DMG penalties
-    /// without turning the renderer into a dot-level pixel FIFO.
+    /// Calculate mode 3 timing from the same penalty schedule used by the
+    /// dot pipeline. Kept separate from `beginPixelTransfer` for focused tests.
     fn calculateMode3Duration(self: *const Ppu, bus: anytype) u16 {
         const lcdc = bus.io.getLcdc();
         var duration: u16 = 172 + @as(u16, bus.io.getScx() & 0x07);
 
         if (self.isWindowVisible(bus)) duration += 6;
         if ((lcdc & 0x02) == 0) return duration;
+
+        duration += self.collectSpritePenalties(bus, null, 289 - duration);
+        return duration;
+    }
+
+    fn collectSpritePenalties(
+        self: *const Ppu,
+        bus: anytype,
+        stalls: ?*[SCREEN_WIDTH]u8,
+        max_penalty: u16,
+    ) u16 {
+        const lcdc = bus.io.getLcdc();
 
         const sprite_height: i16 = if ((lcdc & 0x04) != 0) 16 else 8;
         var sprite_xs: [10]u8 = undefined;
@@ -363,34 +384,43 @@ pub const Ppu = struct {
             sprite_xs[j] = x;
         }
 
+        var total: u16 = 0;
         var last_tile: ?i16 = null;
         for (sprite_xs[0..sprite_count]) |oam_x| {
-            if (oam_x == 0) {
-                duration += 11;
-                continue;
-            }
-            if (oam_x > 167) continue;
+            var penalty: u16 = 0;
+            var stall_x: usize = 0;
 
-            const screen_x = @as(i16, oam_x) - 8;
-            const window_start = @as(i16, bus.io.getWx()) - 7;
-            const using_window = self.isWindowVisible(bus) and screen_x >= window_start;
-            const fetch_x = if (using_window)
-                screen_x - window_start
-            else
-                screen_x + @as(i16, bus.io.getScx());
-            // Keep background and window tile identities separate even when
-            // their numeric X coordinates happen to match.
-            const tile = @divFloor(fetch_x, 8) + (if (using_window) @as(i16, 0x100) else 0);
-            var penalty: u16 = 6;
-            if (last_tile == null or last_tile.? != tile) {
-                const pixel_in_tile: u4 = @intCast(@mod(fetch_x, 8));
-                if (pixel_in_tile < 5) penalty += 5 - pixel_in_tile;
-                last_tile = tile;
+            if (oam_x == 0) {
+                penalty = 11;
+            } else {
+                if (oam_x > 167) continue;
+
+                const screen_x = @as(i16, oam_x) - 8;
+                stall_x = @intCast(@max(screen_x, 0));
+                const window_start = @as(i16, bus.io.getWx()) - 7;
+                const using_window = self.isWindowVisible(bus) and screen_x >= window_start;
+                const fetch_x = if (using_window)
+                    screen_x - window_start
+                else
+                    screen_x + @as(i16, bus.io.getScx());
+                // Keep background and window tile identities separate even
+                // when their numeric X coordinates happen to match.
+                const tile = @divFloor(fetch_x, 8) + (if (using_window) @as(i16, 0x100) else 0);
+                penalty = 6;
+                if (last_tile == null or last_tile.? != tile) {
+                    const pixel_in_tile: u4 = @intCast(@mod(fetch_x, 8));
+                    if (pixel_in_tile < 5) penalty += 5 - pixel_in_tile;
+                    last_tile = tile;
+                }
             }
-            duration += penalty;
+
+            const accepted = @min(penalty, max_penalty - total);
+            if (stalls) |schedule| schedule[stall_x] +|= @intCast(accepted);
+            total += accepted;
+            if (total == max_penalty) break;
         }
 
-        return @min(duration, 289);
+        return total;
     }
 
     /// The frontend consumes this edge; framebuffer ownership stays in PPU.
@@ -458,4 +488,38 @@ test "mode 3 timing includes fine scroll, window, and visible objects" {
     bus.oam[0] = 16;
     bus.oam[1] = 8;
     try std.testing.expectEqual(@as(u16, 194), ppu.calculateMode3Duration(&bus));
+}
+
+test "mode 3 emits background pixels through the dot FIFO" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const TestBus = struct {
+        io: IoRegisters,
+        vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
+        oam: [0xA0]u8 = [_]u8{0} ** 0xA0,
+
+        fn readVram(self: *const @This(), address: u16) u8 {
+            return self.vram[address - 0x8000];
+        }
+
+        fn readOam(self: *const @This(), address: u16) u8 {
+            return self.oam[address - 0xFE00];
+        }
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    // Tile zero is color ID 1 across the row; the post-boot BGP maps it to
+    // shade 3, making it easy to verify that fetch and palette stages ran.
+    bus.vram[0] = 0xFF;
+
+    var ppu = Ppu.init();
+    ppu.setEnabled(true);
+    ppu.tick(76, &bus);
+    try std.testing.expectEqual(PpuMode.PixelTransfer, ppu.mode);
+
+    ppu.tick(172, &bus);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    try std.testing.expectEqual(@as(u16, SCREEN_WIDTH), ppu.pixel_x);
+    try std.testing.expectEqual(@as(u2, 1), ppu.bg_color_ids[0]);
+    try std.testing.expectEqual(DmgColor.Black, ppu.frame_buffer[0][0]);
 }

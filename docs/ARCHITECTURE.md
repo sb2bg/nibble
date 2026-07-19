@@ -19,8 +19,9 @@ same amount.
 - `Mbc` owns mapper registers, address translation, MBC2 internal nibble RAM,
   and the deterministic MBC3 RTC. Mapper snapshots intentionally exclude ROM
   and external-RAM pointers.
-- `Ppu` owns scan timing, window-line state, and the logical DMG frame buffer.
-  It emits a frame-ready edge but has no dependency on SDL or host input.
+- `Ppu` owns dot timing, background/window fetch state, pixel FIFOs,
+  window-line state, and the logical DMG frame buffer. It emits a frame-ready
+  edge but has no dependency on SDL or host input.
 - `SdlFrontend` owns the host window, texture conversion, keyboard mapping, and
   management UI. It is optional; graphical and headless runs execute the same
   PPU core.
@@ -43,14 +44,19 @@ Implemented timing details include:
 - one rising-edge-detected STAT line across mode and LYC sources;
 - variable mode 3 duration for fine SCX scrolling, window startup, and selected
   objects, with HBlank shortened so every visible line stays 456 dots;
+- two-dot background/window tile fetch stages, FIFO startup, fine-scroll pixel
+  discard, and FIFO restart at the window boundary;
+- palette lookup at pixel-output time, allowing mid-scanline BGP changes to
+  affect only pixels that have not reached the LCD yet;
 - a window line counter that advances only on lines where the window is drawn;
 - cycle-driven MBC3 RTC state, making emulation and save states deterministic.
 
 ## Deliberate approximations
 
-The PPU is not yet a dot-level FIFO. It calculates documented mode 3 penalties
-but renders the completed scanline from register values at the end of mode 3, so
-mid-scanline palette, scroll, window, and object-fetch effects are approximate.
+The background/window PPU is dot-driven, but object fetches currently stall the
+background fetcher according to their dot penalties and mix sprite pixels after
+the line; it does not yet have the hardware's separate object FIFO. Mid-scanline
+object palette/OAM effects therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
 OAM corruption is modeled but does not pass every `blargg/oam_bug` case. Serial
