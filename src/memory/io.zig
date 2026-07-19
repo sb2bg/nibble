@@ -195,12 +195,19 @@ pub const IoRegisters = struct {
                 self.data[addr] = (self.data[addr] & 0x80) | (val & 0x01);
             },
             .LCDC => {
+                const was_enabled = (self.data[addr] & 0x80) != 0;
                 self.data[addr] = val;
+                const is_enabled = (val & 0x80) != 0;
+                if (!was_enabled and is_enabled) self.updateCoincidence();
                 self.updateStatInterrupt();
             },
             .LYC => {
                 self.data[addr] = val;
-                self.updateCoincidence();
+                // The LY comparator is clock-gated with the PPU. Its existing
+                // result is retained while LCDC is off, even as LYC changes.
+                if ((self.data[@intFromEnum(IoReg.LCDC)] & 0x80) != 0) {
+                    self.updateCoincidence();
+                }
                 self.updateStatInterrupt();
             },
             .SC => {
@@ -358,7 +365,9 @@ pub const IoRegisters = struct {
 
     pub fn setLy(self: *IoRegisters, ly: u8) void {
         self.data[@intFromEnum(IoReg.LY)] = ly;
-        self.updateCoincidence();
+        if ((self.data[@intFromEnum(IoReg.LCDC)] & 0x80) != 0) {
+            self.updateCoincidence();
+        }
         self.updateStatInterrupt();
     }
 
@@ -381,10 +390,13 @@ pub const IoRegisters = struct {
         const lcd_enabled = (self.data[@intFromEnum(IoReg.LCDC)] & 0x80) != 0;
         const stat = self.data[@intFromEnum(IoReg.STAT)];
         const mode = stat & 0x03;
-        const line_high = lcd_enabled and (((stat & 0x40) != 0 and (stat & 0x04) != 0) or
-            ((stat & 0x20) != 0 and mode == 2) or
-            ((stat & 0x10) != 0 and mode == 1) or
-            ((stat & 0x08) != 0 and mode == 0));
+        // LCD disable gates the mode sources, but the frozen LYC comparator
+        // remains connected to the STAT edge detector. Consequently, a true
+        // comparison retained across off -> on does not create a second edge.
+        const line_high = ((stat & 0x40) != 0 and (stat & 0x04) != 0) or
+            (lcd_enabled and (((stat & 0x20) != 0 and mode == 2) or
+                ((stat & 0x10) != 0 and mode == 1) or
+                ((stat & 0x08) != 0 and mode == 0)));
 
         if (line_high and !self.stat_irq_line) {
             self.requestInterrupt(Interrupt.LCD_STAT);
@@ -430,6 +442,53 @@ test "LYC writes update coincidence and request STAT only on a rising edge" {
     io.clearInterrupt(Interrupt.LCD_STAT);
     io.setPpuMode(2);
     try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT);
+}
+
+test "LY coincidence freezes while LCD is disabled and restarts on enable" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.setLy(144);
+    io.write(@intFromEnum(IoReg.LYC), 144);
+    try std.testing.expect((io.getStat() & 0x04) != 0);
+
+    io.write(@intFromEnum(IoReg.LCDC), 0);
+    io.setLy(0);
+    io.write(@intFromEnum(IoReg.LYC), 1);
+    try std.testing.expect((io.getStat() & 0x04) != 0);
+
+    io.write(@intFromEnum(IoReg.LCDC), 0x80);
+    try std.testing.expectEqual(@as(u8, 0), io.getStat() & 0x04);
+
+    io.write(@intFromEnum(IoReg.LCDC), 0);
+    io.write(@intFromEnum(IoReg.LYC), 0);
+    io.write(@intFromEnum(IoReg.STAT), 0x40);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.write(@intFromEnum(IoReg.LCDC), 0x80);
+    try std.testing.expect((io.getStat() & 0x04) != 0);
+    try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT) != 0);
+}
+
+test "retained LY coincidence does not retrigger when LCD is enabled" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.setLy(144);
+    io.write(@intFromEnum(IoReg.LYC), 144);
+    io.write(@intFromEnum(IoReg.STAT), 0x40);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+
+    io.write(@intFromEnum(IoReg.LCDC), 0);
+    io.setLy(0);
+    io.write(@intFromEnum(IoReg.LYC), 0);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.write(@intFromEnum(IoReg.LCDC), 0x80);
+
+    try std.testing.expect((io.getStat() & 0x04) != 0);
+    try std.testing.expectEqual(
+        @as(u8, 0),
+        io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT,
+    );
 }
 
 test "joypad interrupt follows selected input lines" {
