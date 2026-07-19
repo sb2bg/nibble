@@ -382,7 +382,10 @@ pub const Cpu = struct {
                 break :blk 4;
             },
             .ei => blk: {
-                self.ime_enable_delay = 2;
+                // EI schedules IME after the following instruction. A second
+                // EI must not restart that pending delay; otherwise a stream
+                // of EI opcodes could suppress interrupts indefinitely.
+                if (self.ime_enable_delay == 0) self.ime_enable_delay = 2;
                 break :blk 4;
             },
 
@@ -1068,4 +1071,27 @@ test "interrupt raised during opcode fetch discards the instruction" {
     try std.testing.expectEqual(@as(u16, 0x1234), cpu.bc);
     try std.testing.expectEqual(@as(u16, 0x0050), cpu.pc);
     try std.testing.expectEqual(@as(u16, 0xC000), bus.read16(cpu.sp));
+}
+
+test "consecutive EI instructions do not postpone IME" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0xC000;
+    bus.wram[0] = 0xFB; // EI
+    bus.wram[1] = 0xFB; // EI
+    bus.wram[2] = 0x00; // Must be preempted before NOP executes.
+    bus.ie_register = Interrupt.SERIAL;
+    bus.io.requestInterrupt(Interrupt.SERIAL);
+
+    try std.testing.expectEqual(@as(u8, 4), cpu.step(&bus));
+    try std.testing.expect(!cpu.ime);
+    try std.testing.expectEqual(@as(u8, 4), cpu.step(&bus));
+    try std.testing.expect(cpu.ime);
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0x0058), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xC002), bus.read16(cpu.sp));
 }
