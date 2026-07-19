@@ -127,7 +127,13 @@ pub const Bus = struct {
 
     fn copyDmaByte(self: *Bus) void {
         const index = self.dma.next_byte;
-        self.oam[index] = self.readNoTick(self.dma.source + @as(u16, index));
+        const raw_source = self.dma.source + @as(u16, index);
+        // The DMG DMA address decoder mirrors E000-FFFF onto C000-DFFF.
+        // This includes nominal OAM/IO source pages FE and FF; treating them as
+        // normal CPU addresses incorrectly feeds OAM or register values back
+        // into the transfer.
+        const source = if (raw_source >= 0xE000) raw_source - 0x2000 else raw_source;
+        self.oam[index] = self.readNoTick(source);
 
         if (index == 0x9F) {
             self.dma.active = false;
@@ -505,6 +511,29 @@ test "OAM DMA restart remains writable and delays the new source" {
     try std.testing.expectEqual(@as(u8, 0x11), bus.oam[0]);
     bus.tickDma(4);
     try std.testing.expectEqual(@as(u8, 0xA1), bus.oam[0]);
+}
+
+test "DMG DMA source pages E0 through FF mirror C0 through DF" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    bus.wram[0] = 0xC0;
+    bus.wram[0x1E00] = 0xDE;
+    bus.wram[0x1F00] = 0xDF;
+
+    for ([_]struct { page: u8, expected: u8 }{
+        .{ .page = 0xE0, .expected = 0xC0 },
+        .{ .page = 0xFE, .expected = 0xDE },
+        .{ .page = 0xFF, .expected = 0xDF },
+    }) |case| {
+        bus.write(0xFF46, case.page);
+        bus.tickDma(12);
+        try std.testing.expectEqual(case.expected, bus.oam[0]);
+        bus.dma = .{};
+    }
 }
 
 test "CPU VRAM access is blocked during pixel transfer" {
