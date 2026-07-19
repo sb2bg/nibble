@@ -762,6 +762,9 @@ pub const Cpu = struct {
             },
             .ret_cc => |cond| blk: {
                 if (self.checkCondition(cond)) {
+                    // A taken conditional RET inserts one M-cycle before the
+                    // two stack reads and one after them.
+                    bus.tickInternal(4);
                     self.pc = self.pop(bus);
                     break :blk 20;
                 }
