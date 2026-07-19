@@ -351,11 +351,7 @@ pub const Bus = struct {
             0xFEA0...0xFEFF => 0xFF,
 
             // I/O Registers
-            0xFF00...0xFF7F => blk: {
-                const io_addr: u8 = @truncate(addr - 0xFF00);
-                if (io_addr == @intFromEnum(IoReg.DIV)) break :blk self.timer.readDiv();
-                break :blk self.io.read(io_addr);
-            },
+            0xFF00...0xFF7F => self.io.read(@truncate(addr - 0xFF00)),
 
             // High RAM
             0xFF80...0xFFFE => self.hram[addr - 0xFF80],

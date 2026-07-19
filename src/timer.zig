@@ -92,12 +92,6 @@ pub const Timer = struct {
         }
     }
 
-    pub fn readDiv(self: *const Timer) u8 {
-        // The DIV data latch samples one M-cycle beyond the phase used by the
-        // programmable timer's edge detector.
-        return @truncate((self.system_counter +% 4) >> 8);
-    }
-
     fn tickReload(self: *Timer, io: *IoRegisters) void {
         if (self.reload_delay == 0) return;
 
@@ -153,14 +147,6 @@ test "DIV reset can clock TIMA on a falling edge" {
 
     try std.testing.expectEqual(@as(u16, 0), timer.system_counter);
     try std.testing.expectEqual(@as(u8, 1), io.data[@intFromEnum(IoReg.TIMA)]);
-}
-
-test "DIV CPU read uses the later bus-latch phase" {
-    var timer = Timer.init();
-    timer.system_counter = 0x11FC;
-
-    try std.testing.expectEqual(@as(u8, 0x12), timer.readDiv());
-    try std.testing.expectEqual(@as(u16, 0x11FC), timer.system_counter);
 }
 
 test "TIMA reload and interrupt occur four T-cycles after overflow" {
