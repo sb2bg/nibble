@@ -193,6 +193,10 @@ pub const Ppu = struct {
 
                     if (self.ly == 144) {
                         bus.io.setLy(self.ly);
+                        // DMG exposes the mode-2 STAT source as VBlank begins,
+                        // even though the public mode changes to 1. This pulse
+                        // is simultaneous with the VBlank request.
+                        bus.io.preassertMode2Stat();
                         self.setMode(.VBlank, bus);
                         bus.io.requestInterrupt(Interrupt.VBLANK);
                         self.frame_ready = true;
