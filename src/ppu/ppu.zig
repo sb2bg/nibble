@@ -100,7 +100,10 @@ pub const Ppu = struct {
 
         switch (self.mode) {
             .OamSearch => {
-                const row: u8 = @intCast(@min(self.mode_cycles / 4, 19));
+                // CPU bus accesses are committed after their four-dot hook.
+                // Keep the OAM row on the word scanned during that M-cycle;
+                // advancing at the first dot shifts every corruption pattern.
+                const row: u8 = @intCast(@min((self.mode_cycles - 1) / 4, 19));
                 bus.io.setOamScanRow(row);
                 if (self.mode_cycles == 80) self.beginPixelTransfer(bus);
             },
@@ -457,6 +460,23 @@ test "disabling LCD leaves PPU in HBlank mode" {
 
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     try std.testing.expectEqual(@as(u8, 0), ppu.ly);
+}
+
+test "OAM scan row advances after each four-dot bus window" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const TestBus = struct { io: IoRegisters };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    var ppu = Ppu.init();
+    ppu.enabled = true;
+    ppu.mode = .OamSearch;
+    ppu.mode_cycles = 0;
+
+    ppu.tick(4, &bus);
+    try std.testing.expectEqual(@as(u8, 0), bus.io.getOamScanRow());
+    ppu.tick(4, &bus);
+    try std.testing.expectEqual(@as(u8, 1), bus.io.getOamScanRow());
 }
 
 test "mode 3 timing includes fine scroll, window, and visible objects" {
