@@ -294,7 +294,10 @@ pub const Bus = struct {
     fn readInternal(self: *const Bus, addr: u16, count_cycle: bool) u8 {
         if (count_cycle) self.tickAccess();
 
-        if (count_cycle and self.dma.active and !isHramAddress(addr)) {
+        // FF46 is wired to its own latch and remains readable while DMA owns
+        // the main bus. Software sees the most recently written source byte.
+        const is_dma_register = addr == 0xFF46;
+        if (count_cycle and self.dma.active and !isHramAddress(addr) and !is_dma_register) {
             return 0xFF;
         }
 
@@ -492,6 +495,7 @@ test "OAM DMA restart remains writable and delays the new source" {
 
     bus.write(0xFF46, 0xD0);
     try std.testing.expectEqual(@as(u8, 8), bus.dma.start_delay);
+    try std.testing.expectEqual(@as(u8, 0xD0), bus.read(0xFF46));
     bus.tickDma(4);
     try std.testing.expectEqual(@as(u8, 0x12), bus.oam[1]);
     try std.testing.expectEqual(@as(u16, 0xC000), bus.dma.source);
