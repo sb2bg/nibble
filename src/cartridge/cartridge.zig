@@ -32,12 +32,18 @@ pub const RomHeader = struct {
         };
     }
 
-    pub fn getMbcType(self: *const RomHeader) MbcType {
+    pub fn getMbcType(self: *const RomHeader) ?MbcType {
         return MbcType.fromCartridgeType(self.cartridge_type);
     }
 
-    pub fn getRomBankCount(self: *const RomHeader) u16 {
-        return @as(u16, 2) << @intCast(self.rom_size);
+    pub fn getRomBankCount(self: *const RomHeader) ?u16 {
+        return switch (self.rom_size) {
+            0x00...0x08 => @as(u16, 2) << @intCast(self.rom_size),
+            0x52 => 72,
+            0x53 => 80,
+            0x54 => 96,
+            else => null,
+        };
     }
 
     pub fn getRamSizeBytes(self: *const RomHeader) usize {
@@ -112,13 +118,21 @@ pub const RomHeader = struct {
         std.debug.print("Cartridge Type: 0x{X:0>2} ({s})\n", .{ self.cartridge_type, cartridgeTypeName(self.cartridge_type) });
 
         // ROM size
-        std.debug.print("ROM Size: {d} KB ({d} banks)\n", .{ @as(u32, 32) << @intCast(self.rom_size), self.getRomBankCount() });
+        if (self.getRomBankCount()) |banks| {
+            std.debug.print("ROM Size: {d} KB ({d} banks)\n", .{ @as(u32, banks) * 16, banks });
+        } else {
+            std.debug.print("ROM Size: unknown code 0x{X:0>2}\n", .{self.rom_size});
+        }
 
         // RAM size
         std.debug.print("RAM Size: {s}\n", .{ramSizeName(self.ram_size)});
 
         // MBC type
-        std.debug.print("MBC Type: {s}\n", .{@tagName(self.getMbcType())});
+        if (self.getMbcType()) |mbc_type| {
+            std.debug.print("MBC Type: {s}\n", .{@tagName(mbc_type)});
+        } else {
+            std.debug.print("MBC Type: unsupported\n", .{});
+        }
     }
 };
 
@@ -135,16 +149,19 @@ pub const Cartridge = struct {
         defer file.close();
 
         const stat = try file.stat();
+        if (stat.size < 0x150) return error.RomTooSmall;
         const rom_data = try allocator.alloc(u8, stat.size);
         errdefer allocator.free(rom_data);
 
-        const bytes_read = try file.read(rom_data);
+        const bytes_read = try file.readAll(rom_data);
         if (bytes_read != stat.size) {
             return error.IncompleteRead;
         }
 
         const header = RomHeader.parse(rom_data);
-        const mbc_type = header.getMbcType();
+        const mbc_type = header.getMbcType() orelse return error.UnsupportedCartridgeType;
+        const rom_banks = header.getRomBankCount() orelse return error.InvalidRomSizeCode;
+        if (rom_data.len < @as(usize, rom_banks) * 0x4000) return error.TruncatedRom;
 
         // Allocate external RAM if needed
         const ram_size = header.getRamSizeBytes();
@@ -160,7 +177,12 @@ pub const Cartridge = struct {
             .rom_data = rom_data,
             .ram_data = ram_data,
             .header = header,
-            .mbc = Mbc.init(mbc_type, rom_data, ram_data),
+            .mbc = Mbc.init(
+                mbc_type,
+                rom_data,
+                ram_data,
+                header.cartridge_type == 0x0F or header.cartridge_type == 0x10,
+            ),
         };
     }
 
