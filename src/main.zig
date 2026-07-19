@@ -1,104 +1,74 @@
 const std = @import("std");
-const clap = @import("clap");
+const cli = @import("cli.zig");
 const Emulator = @import("emulator.zig").Emulator;
 const EmulatorOptions = @import("emulator.zig").EmulatorOptions;
 
-const params = clap.parseParamsComptime(
-    \\-h, --help             Display this help and exit.
-    \\-d, --debug            Enable debug output during execution.
-    \\-s, --steps <usize>    Maximum number of steps to execute (default: unlimited).
-    \\-b, --breakpoint <u16> Set a breakpoint at the specified address (hex).
-    \\--headless             Run without graphics (for testing).
-    \\<str>                  ROM file to load.
+const help_text =
+    \\Usage: nibble [OPTIONS] <ROM_FILE>
     \\
-);
+    \\A Game Boy emulator written in Zig.
+    \\
+    \\Options:
+    \\  -h, --help              Display this help and exit
+    \\  -d, --debug             Enable instruction tracing
+    \\  -s, --steps <COUNT>     Stop after COUNT instructions
+    \\  -b, --breakpoint <HEX>  Stop before executing address HEX
+    \\  --headless              Run without graphics
+    \\
+    \\Controls:
+    \\  D-pad   : Arrow keys
+    \\  A       : X or A
+    \\  B       : Z or S
+    \\  Start   : Enter, keypad Enter, or Space
+    \\  Select  : Backspace or Tab
+    \\
+    \\Management:
+    \\  P       : Pause/resume emulation
+    \\  R       : Reset emulator
+    \\  F5/F9   : Save/load state for active slot
+    \\  [ / ]   : Previous/next save slot
+    \\  Esc     : Quit
+    \\
+    \\Examples:
+    \\  nibble roms/blargg/cpu_instrs/cpu_instrs.gb
+    \\  nibble -d -s 1000 roms/blargg/cpu_instrs/cpu_instrs.gb
+    \\  nibble --headless -s 10000000 roms/blargg/cpu_instrs/cpu_instrs.gb
+    \\
+;
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    // Parse command-line arguments
-    var diag = clap.Diagnostic{};
-    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{
-        .diagnostic = &diag,
-        .allocator = allocator,
-    }) catch |err| {
-        var stderr_buf: [1024]u8 = undefined;
-        var stderr_writer = std.fs.File.stderr().writer(&stderr_buf);
-        diag.report(&stderr_writer.interface, err) catch {};
-        stderr_writer.interface.flush() catch {};
-        return err;
+pub fn main(init: std.process.Init) !void {
+    const argv = try init.minimal.args.toSlice(init.arena.allocator());
+    const parsed = cli.parse(argv[1..]) catch |err| {
+        std.process.fatal("invalid arguments ({s}); try 'nibble --help'", .{@errorName(err)});
     };
-    defer res.deinit();
 
-    // Handle help
-    if (res.args.help != 0) {
-        var buf: [4096]u8 = undefined;
-        var stdout_writer = std.fs.File.stdout().writer(&buf);
-        try stdout_writer.interface.print(
-            \\Usage: nibble [OPTIONS] <ROM_FILE>
-            \\
-            \\A Game Boy emulator written in Zig.
-            \\
-            \\Options:
-            \\  -h, --help              Display this help and exit
-            \\  -d, --debug             Enable debug output during execution
-            \\  -s, --steps <COUNT>     Maximum number of steps to execute
-            \\  -b, --breakpoint <ADDR> Set a breakpoint at the specified address (hex)
-            \\  --headless              Run without graphics (for testing)
-            \\
-            \\Controls:
-            \\  D-pad   : Arrow keys
-            \\  A       : X or A
-            \\  B       : Z or S
-            \\  Start   : Enter, keypad Enter, or Space
-            \\  Select  : Backspace or Tab
-            \\
-            \\Management:
-            \\  P       : Pause/resume emulation
-            \\  R       : Reset emulator
-            \\  F5/F9   : Save/load state for active slot
-            \\  [ / ]   : Previous/next save slot
-            \\  Esc     : Quit
-            \\  Title   : Shows run/pause state, active slot, and last action
-            \\
-            \\Example:
-            \\  nibble roms/cpu_instrs/cpu_instrs.gb
-            \\  nibble -d -s 1000 roms/cpu_instrs/cpu_instrs.gb
-            \\  nibble --headless -s 10000000 roms/cpu_instrs/cpu_instrs.gb
-            \\
-        , .{});
-        try stdout_writer.interface.flush();
+    if (parsed.help) {
+        var stdout_buffer: [4096]u8 = undefined;
+        var stdout_file_writer: std.Io.File.Writer = .init(.stdout(), init.io, &stdout_buffer);
+        const stdout = &stdout_file_writer.interface;
+        try stdout.writeAll(help_text);
+        try stdout.flush();
         return;
     }
 
-    // Get ROM path from positional argument
-    const rom_path = if (res.positionals.len > 0) res.positionals[0].? else {
-        std.debug.print("Error: ROM file path required\n", .{});
-        std.debug.print("Usage: nibble [OPTIONS] <ROM_FILE>\n", .{});
-        std.debug.print("Try 'nibble --help' for more information.\n", .{});
-        return;
+    const rom_path = parsed.rom_path orelse
+        std.process.fatal("ROM file path required; try 'nibble --help'", .{});
+
+    const options: EmulatorOptions = .{
+        .debug = parsed.debug,
+        .max_steps = parsed.max_steps,
+        .breakpoint = parsed.breakpoint,
+        .headless = parsed.headless,
     };
 
-    const options = EmulatorOptions{
-        .debug = res.args.debug != 0,
-        .max_steps = res.args.steps,
-        .breakpoint = res.args.breakpoint,
-        .headless = res.args.headless != 0,
-    };
-
-    // Initialize and run the emulator
-    var emu = Emulator.init(allocator, rom_path, options) catch |err| {
-        std.debug.print("Error initializing emulator with ROM '{s}': {any}\n", .{ rom_path, err });
-        return;
+    var emu = Emulator.init(init.gpa, init.io, rom_path, options) catch |err| {
+        std.process.fatal("unable to initialize ROM '{s}': {s}", .{ rom_path, @errorName(err) });
     };
     defer emu.deinit();
 
     emu.run();
     emu.printCartRamTestOutput();
 
-    // Print serial output summary (useful for test ROMs)
     if (!options.debug) {
         std.debug.print("\n=== Execution Complete ===\n", .{});
         std.debug.print("Total steps: {d}\n", .{emu.steps});

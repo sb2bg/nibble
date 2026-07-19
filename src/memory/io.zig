@@ -114,7 +114,7 @@ pub const IoRegisters = struct {
             .oam_scan_row = 0,
             .stat_irq_line = false,
             .allocator = allocator,
-            .serial_output = std.ArrayList(u8){},
+            .serial_output = .empty,
         };
 
         // Set initial values for some registers (post-boot ROM values)

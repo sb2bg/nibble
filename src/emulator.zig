@@ -78,6 +78,7 @@ const SaveState = struct {
 };
 
 pub const Emulator = struct {
+    io: std.Io,
     cpu: Cpu,
     bus: Bus,
     ppu: Ppu,
@@ -91,12 +92,12 @@ pub const Emulator = struct {
     status_message: [48]u8 = [_]u8{0} ** 48,
     status_message_len: usize = 0,
     save_slots: [SAVE_SLOT_COUNT]?SaveState = [_]?SaveState{null} ** SAVE_SLOT_COUNT,
-    last_ui_redraw_ns: i128 = 0,
+    last_ui_redraw_ns: i96 = 0,
 
     /// Initialize the emulator with a ROM file
-    pub fn init(allocator: Allocator, rom_path: []const u8, options: EmulatorOptions) !Emulator {
+    pub fn init(allocator: Allocator, io: std.Io, rom_path: []const u8, options: EmulatorOptions) !Emulator {
         // Load the cartridge
-        var cartridge = try Cartridge.load(allocator, rom_path);
+        var cartridge = try Cartridge.load(allocator, io, rom_path);
         errdefer cartridge.deinit();
 
         // Initialize PPU. In headless mode (or if SDL fails), keep a logic-only
@@ -112,6 +113,7 @@ pub const Emulator = struct {
         errdefer ppu.deinit();
 
         return Emulator{
+            .io = io,
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
             .ppu = ppu,
@@ -130,7 +132,7 @@ pub const Emulator = struct {
     pub fn run(self: *Emulator) void {
         self.running = true;
         self.paused = false;
-        self.last_ui_redraw_ns = std.time.nanoTimestamp();
+        self.last_ui_redraw_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (self.status_message_len == 0) {
             self.setStatusMessage("READY");
         }
@@ -156,7 +158,7 @@ pub const Emulator = struct {
             self.maybeRedrawUi();
 
             if (self.paused) {
-                std.Thread.sleep(8 * std.time.ns_per_ms);
+                std.Io.sleep(self.io, .fromMilliseconds(8), .awake) catch {};
                 continue;
             }
 
@@ -246,7 +248,7 @@ pub const Emulator = struct {
 
     fn maybeRedrawUi(self: *Emulator) void {
         if (!self.ppu.sdl_initialized) return;
-        const now = std.time.nanoTimestamp();
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
             self.ppu.redraw();
             self.last_ui_redraw_ns = now;

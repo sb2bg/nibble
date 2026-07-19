@@ -29,7 +29,7 @@ Known gaps:
 
 ## Requirements
 
-- Zig `0.15.x` (project minimum in `build.zig.zon` is `0.15.0-dev.383+927f233ff`)
+- Zig `0.16.x` (project minimum in `build.zig.zon` is `0.16.0`)
 - `SDL2` development libraries
 - `pkg-config` (used by Zig build to find SDL2)
 
@@ -61,7 +61,7 @@ CLI options:
 - `-h`, `--help`: show help
 - `-d`, `--debug`: verbose step-by-step debug output
 - `-s`, `--steps <COUNT>`: stop after a maximum number of steps
-- `-b`, `--breakpoint <ADDR>`: stop when `PC == ADDR`
+- `-b`, `--breakpoint <HEX>`: stop when `PC == HEX` (with or without a `0x` prefix)
 - `--headless`: run without graphics
 
 Controls (default):

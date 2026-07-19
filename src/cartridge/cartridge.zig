@@ -144,17 +144,18 @@ pub const Cartridge = struct {
     header: RomHeader,
     mbc: Mbc,
 
-    pub fn load(allocator: Allocator, path: []const u8) !Cartridge {
-        const file = try std.fs.cwd().openFile(path, .{});
-        defer file.close();
+    pub fn load(allocator: Allocator, io: std.Io, path: []const u8) !Cartridge {
+        const file = try std.Io.Dir.cwd().openFile(io, path, .{});
+        defer file.close(io);
 
-        const stat = try file.stat();
+        const stat = try file.stat(io);
         if (stat.size < 0x150) return error.RomTooSmall;
-        const rom_data = try allocator.alloc(u8, stat.size);
+        const rom_size = std.math.cast(usize, stat.size) orelse return error.RomTooLarge;
+        const rom_data = try allocator.alloc(u8, rom_size);
         errdefer allocator.free(rom_data);
 
-        const bytes_read = try file.readAll(rom_data);
-        if (bytes_read != stat.size) {
+        const bytes_read = try file.readPositionalAll(io, rom_data, 0);
+        if (bytes_read != rom_size) {
             return error.IncompleteRead;
         }
 
