@@ -47,6 +47,8 @@ Implemented timing details include:
   objects, with HBlank shortened so every visible line stays 456 dots;
 - two-dot background/window tile fetch stages, FIFO startup, fine-scroll pixel
   discard, and FIFO restart at the window boundary;
+- mode-2 selection of at most ten objects, DMG X/OAM priority ordering, and an
+  eight-pixel object FIFO mixed with background pixels at LCD output time;
 - palette lookup at pixel-output time, allowing mid-scanline BGP changes to
   affect only pixels that have not reached the LCD yet;
 - a window line counter that advances only on lines where the window is drawn;
@@ -54,10 +56,10 @@ Implemented timing details include:
 
 ## Deliberate approximations
 
-The background/window PPU is dot-driven, but object fetches currently stall the
-background fetcher according to their dot penalties and mix sprite pixels after
-the line; it does not yet have the hardware's separate object FIFO. Mid-scanline
-object palette/OAM effects therefore remain approximate.
+The PPU has separate background and object FIFOs, but an object tile fetch is
+still represented as one scheduled stall and atomic tile-row read instead of
+the hardware's cancelable fetch micro-steps. Rapid mid-fetch LCDC changes and
+some background/object fetcher arbitration therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
 OAM corruption is modeled but does not pass every `blargg/oam_bug` case. Serial
