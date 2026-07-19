@@ -99,6 +99,7 @@ Test and reference ROMs are available under `roms/` (for example `roms/blargg/` 
 - `src/cpu/`: CPU core + instruction decode/execute
 - `src/memory/`: memory bus, IO registers, and MBC logic
 - `src/ppu/`: PPU timing and rendering
+- `src/frontend/`: optional host presentation and input adapters
 - `src/timer.zig`: timer/divider logic
 - `src/sdl.zig`: minimal SDL2 bindings
 - `roms/`: local ROMs used for development/testing

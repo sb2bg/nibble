@@ -1,11 +1,9 @@
 const std = @import("std");
-const sdl = @import("../sdl.zig");
 const Interrupt = @import("../memory/io.zig").Interrupt;
 
 /// Game Boy screen dimensions
 pub const SCREEN_WIDTH = 160;
 pub const SCREEN_HEIGHT = 144;
-const WINDOW_SCALE = 3;
 
 /// PPU modes (STAT register bits 0-1)
 pub const PpuMode = enum(u2) {
@@ -15,41 +13,17 @@ pub const PpuMode = enum(u2) {
     PixelTransfer = 3,
 };
 
-/// DMG color palette (4 shades of gray/green)
+/// Logical DMG palette index after applying BGP/OBP mapping.
 pub const DmgColor = enum(u2) {
     White = 0,
     LightGray = 1,
     DarkGray = 2,
     Black = 3,
-
-    pub fn toRgb(self: DmgColor) u32 {
-        return switch (self) {
-            .White => 0xE0F8D0,
-            .LightGray => 0x88C070,
-            .DarkGray => 0x346856,
-            .Black => 0x081820,
-        };
-    }
-};
-
-pub const UiActions = struct {
-    quit: bool = false,
-    toggle_pause: bool = false,
-    reset: bool = false,
-    save_state: bool = false,
-    load_state: bool = false,
-    prev_slot: bool = false,
-    next_slot: bool = false,
 };
 
 /// Picture Processing Unit
 pub const Ppu = struct {
     frame_buffer: [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor,
-
-    window: ?*sdl.Window,
-    renderer: ?*sdl.Renderer,
-    texture: ?*sdl.Texture,
-    sdl_initialized: bool,
 
     mode: PpuMode,
     mode_cycles: u32,
@@ -57,107 +31,19 @@ pub const Ppu = struct {
     ly: u8,
     window_line: u8,
     enabled: bool,
+    frame_ready: bool,
 
-    ui_paused: bool,
-    ui_slot: u8,
-    ui_slot_has_state: bool,
-    ui_message: [48]u8,
-    ui_message_len: usize,
-
-    prev_pause_key: bool,
-    prev_reset_key: bool,
-    prev_save_key: bool,
-    prev_load_key: bool,
-    prev_prev_slot_key: bool,
-    prev_next_slot_key: bool,
-    prev_quit_key: bool,
-
-    pub fn init() !Ppu {
-        sdl.init(sdl.INIT_VIDEO) catch {
-            std.debug.print("SDL_Init Error: {s}\n", .{sdl.getError()});
-            return error.SdlInitFailed;
-        };
-
-        const window = sdl.createWindow(
-            "Nibble",
-            sdl.WINDOWPOS_CENTERED,
-            sdl.WINDOWPOS_CENTERED,
-            SCREEN_WIDTH * WINDOW_SCALE,
-            SCREEN_HEIGHT * WINDOW_SCALE,
-            sdl.WINDOW_SHOWN,
-        ) catch {
-            std.debug.print("SDL_CreateWindow Error: {s}\n", .{sdl.getError()});
-            sdl.quit();
-            return error.SdlWindowFailed;
-        };
-
-        const renderer = sdl.createRenderer(window, -1, sdl.RENDERER_ACCELERATED) catch {
-            std.debug.print("SDL_CreateRenderer Error: {s}\n", .{sdl.getError()});
-            sdl.destroyWindow(window);
-            sdl.quit();
-            return error.SdlRendererFailed;
-        };
-
-        const texture = sdl.createTexture(
-            renderer,
-            sdl.PIXELFORMAT_RGB888,
-            sdl.TEXTUREACCESS_STREAMING,
-            SCREEN_WIDTH,
-            SCREEN_HEIGHT,
-        ) catch {
-            std.debug.print("SDL_CreateTexture Error: {s}\n", .{sdl.getError()});
-            sdl.destroyRenderer(renderer);
-            sdl.destroyWindow(window);
-            sdl.quit();
-            return error.SdlTextureFailed;
-        };
-
-        var ppu = initCommon();
-        ppu.window = window;
-        ppu.renderer = renderer;
-        ppu.texture = texture;
-        ppu.sdl_initialized = true;
-        ppu.refreshWindowTitle();
-        return ppu;
-    }
-
-    pub fn initHeadless() Ppu {
-        return initCommon();
-    }
-
-    fn initCommon() Ppu {
+    pub fn init() Ppu {
         return Ppu{
             .frame_buffer = [_][SCREEN_WIDTH]DmgColor{[_]DmgColor{.White} ** SCREEN_WIDTH} ** SCREEN_HEIGHT,
-            .window = null,
-            .renderer = null,
-            .texture = null,
-            .sdl_initialized = false,
             .mode = .VBlank,
             .mode_cycles = 0,
             .mode3_duration = 172,
             .ly = 0x91,
             .window_line = 0,
             .enabled = false,
-            .ui_paused = false,
-            .ui_slot = 0,
-            .ui_slot_has_state = false,
-            .ui_message = [_]u8{0} ** 48,
-            .ui_message_len = 0,
-            .prev_pause_key = false,
-            .prev_reset_key = false,
-            .prev_save_key = false,
-            .prev_load_key = false,
-            .prev_prev_slot_key = false,
-            .prev_next_slot_key = false,
-            .prev_quit_key = false,
+            .frame_ready = false,
         };
-    }
-
-    pub fn deinit(self: *Ppu) void {
-        if (self.texture) |t| sdl.destroyTexture(t);
-        if (self.renderer) |r| sdl.destroyRenderer(r);
-        if (self.window) |w| sdl.destroyWindow(w);
-        if (self.sdl_initialized) sdl.quit();
     }
 
     pub fn reset(self: *Ppu) void {
@@ -167,19 +53,8 @@ pub const Ppu = struct {
         self.ly = 0;
         self.window_line = 0;
         self.enabled = false;
+        self.frame_ready = true;
         @memset(&self.frame_buffer, [_]DmgColor{.White} ** SCREEN_WIDTH);
-        self.ui_paused = false;
-        self.ui_slot = 0;
-        self.ui_slot_has_state = false;
-        self.ui_message_len = 0;
-        self.prev_pause_key = false;
-        self.prev_reset_key = false;
-        self.prev_save_key = false;
-        self.prev_load_key = false;
-        self.prev_prev_slot_key = false;
-        self.prev_next_slot_key = false;
-        self.prev_quit_key = false;
-        self.refreshWindowTitle();
     }
 
     fn setMode(self: *Ppu, mode: PpuMode, bus: anytype) void {
@@ -222,7 +97,7 @@ pub const Ppu = struct {
                     if (self.ly == 144) {
                         self.setMode(.VBlank, bus);
                         bus.io.requestInterrupt(Interrupt.VBLANK);
-                        self.present();
+                        self.frame_ready = true;
                     } else {
                         self.setMode(.OamSearch, bus);
                     }
@@ -518,134 +393,11 @@ pub const Ppu = struct {
         return @min(duration, 289);
     }
 
-    fn present(self: *Ppu) void {
-        if (!self.sdl_initialized) return;
-
-        var pixels: [SCREEN_HEIGHT * SCREEN_WIDTH * 4]u8 =
-            [_]u8{0} ** (SCREEN_HEIGHT * SCREEN_WIDTH * 4);
-
-        for (0..SCREEN_HEIGHT) |y| {
-            for (0..SCREEN_WIDTH) |x| {
-                const offset = (y * SCREEN_WIDTH + x) * 4;
-                const rgb = self.frame_buffer[y][x].toRgb();
-                pixels[offset + 0] = @intCast((rgb >> 16) & 0xFF);
-                pixels[offset + 1] = @intCast((rgb >> 8) & 0xFF);
-                pixels[offset + 2] = @intCast(rgb & 0xFF);
-                pixels[offset + 3] = 0xFF;
-            }
-        }
-
-        if (self.texture) |tex| {
-            sdl.updateTexture(tex, null, pixels[0..], SCREEN_WIDTH * 4) catch {};
-        }
-
-        if (self.renderer) |ren| {
-            sdl.renderClear(ren) catch {};
-            if (self.texture) |tex| {
-                sdl.renderCopy(ren, tex, null, null) catch {};
-            }
-            sdl.renderPresent(ren);
-        }
-    }
-
-    pub fn pollEvents(self: *Ppu, bus: anytype) UiActions {
-        var actions = UiActions{};
-        if (!self.sdl_initialized) return actions;
-
-        var event: sdl.Event = undefined;
-        while (sdl.pollEvent(&event)) {
-            if (event.type == sdl.QUIT) {
-                actions.quit = true;
-            }
-        }
-
-        sdl.pumpEvents();
-        const keys = sdl.getKeyboardState();
-
-        var state: u8 = 0xFF;
-        if (keys.len != 0) {
-            if (isPressed(keys, sdl.SCANCODE_RIGHT)) state &= ~@as(u8, 0x01);
-            if (isPressed(keys, sdl.SCANCODE_LEFT)) state &= ~@as(u8, 0x02);
-            if (isPressed(keys, sdl.SCANCODE_UP)) state &= ~@as(u8, 0x04);
-            if (isPressed(keys, sdl.SCANCODE_DOWN)) state &= ~@as(u8, 0x08);
-            if (isPressed(keys, sdl.SCANCODE_X) or isPressed(keys, sdl.SCANCODE_A)) state &= ~@as(u8, 0x10);
-            if (isPressed(keys, sdl.SCANCODE_Z) or isPressed(keys, sdl.SCANCODE_S)) state &= ~@as(u8, 0x20);
-            if (isPressed(keys, sdl.SCANCODE_BACKSPACE) or isPressed(keys, sdl.SCANCODE_TAB)) state &= ~@as(u8, 0x40);
-            if (isPressed(keys, sdl.SCANCODE_RETURN) or isPressed(keys, sdl.SCANCODE_KP_ENTER) or isPressed(keys, sdl.SCANCODE_SPACE)) state &= ~@as(u8, 0x80);
-        }
-
-        bus.io.setJoypadState(state);
-
-        if (keys.len != 0) {
-            actions.quit = actions.quit or edgePressed(&self.prev_quit_key, isPressed(keys, sdl.SCANCODE_ESCAPE));
-            actions.toggle_pause = edgePressed(&self.prev_pause_key, isPressed(keys, sdl.SCANCODE_P));
-            actions.reset = edgePressed(&self.prev_reset_key, isPressed(keys, sdl.SCANCODE_R));
-            actions.save_state = edgePressed(&self.prev_save_key, isPressed(keys, sdl.SCANCODE_F5));
-            actions.load_state = edgePressed(&self.prev_load_key, isPressed(keys, sdl.SCANCODE_F9));
-            actions.prev_slot = edgePressed(&self.prev_prev_slot_key, isPressed(keys, sdl.SCANCODE_LEFTBRACKET));
-            actions.next_slot = edgePressed(&self.prev_next_slot_key, isPressed(keys, sdl.SCANCODE_RIGHTBRACKET));
-        } else {
-            self.prev_quit_key = false;
-            self.prev_pause_key = false;
-            self.prev_reset_key = false;
-            self.prev_save_key = false;
-            self.prev_load_key = false;
-            self.prev_prev_slot_key = false;
-            self.prev_next_slot_key = false;
-        }
-
-        return actions;
-    }
-
-    pub fn setUiStatus(
-        self: *Ppu,
-        paused: bool,
-        slot: u8,
-        slot_has_state: bool,
-        message: []const u8,
-    ) void {
-        self.ui_paused = paused;
-        self.ui_slot = slot;
-        self.ui_slot_has_state = slot_has_state;
-        self.ui_message_len = @min(message.len, self.ui_message.len);
-        if (self.ui_message_len > 0) {
-            @memcpy(self.ui_message[0..self.ui_message_len], message[0..self.ui_message_len]);
-        }
-        self.refreshWindowTitle();
-    }
-
-    pub fn redraw(self: *Ppu) void {
-        self.refreshWindowTitle();
-        self.present();
-    }
-
-    fn refreshWindowTitle(self: *Ppu) void {
-        if (!self.sdl_initialized) return;
-        const window = self.window orelse return;
-
-        var title_buf: [128:0]u8 = undefined;
-        const state = if (self.ui_paused) "Paused" else "Running";
-        const slot_state = if (self.ui_slot_has_state) "set" else "empty";
-        const title = if (self.ui_message_len > 0)
-            std.fmt.bufPrintZ(
-                &title_buf,
-                "Nibble | {s} | Slot {d} {s} | {s}",
-                .{ state, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
-            ) catch "Nibble"
-        else
-            std.fmt.bufPrintZ(
-                &title_buf,
-                "Nibble | {s} | Slot {d} {s}",
-                .{ state, self.ui_slot, slot_state },
-            ) catch "Nibble";
-
-        sdl.setWindowTitle(window, title);
-    }
-
-    fn edgePressed(previous: *bool, current: bool) bool {
-        const pressed = current and !previous.*;
-        previous.* = current;
-        return pressed;
+    /// The frontend consumes this edge; framebuffer ownership stays in PPU.
+    pub fn takeFrameReady(self: *Ppu) bool {
+        const ready = self.frame_ready;
+        self.frame_ready = false;
+        return ready;
     }
 
     pub fn setEnabled(self: *Ppu, enabled: bool) void {
@@ -666,14 +418,10 @@ pub const Ppu = struct {
             self.window_line = 0;
         }
     }
-
-    fn isPressed(keys: []const u8, scancode: usize) bool {
-        return scancode < keys.len and keys[scancode] != 0;
-    }
 };
 
 test "disabling LCD leaves PPU in HBlank mode" {
-    var ppu = Ppu.initHeadless();
+    var ppu = Ppu.init();
     ppu.mode = .PixelTransfer;
     ppu.setEnabled(false);
 
@@ -695,7 +443,7 @@ test "mode 3 timing includes fine scroll, window, and visible objects" {
 
     var bus = TestBus{ .io = IoRegisters.init(std.testing.allocator) };
     defer bus.io.deinit();
-    var ppu = Ppu.initHeadless();
+    var ppu = Ppu.init();
     ppu.ly = 0;
 
     bus.io.data[@intFromEnum(IoReg.SCX)] = 5;

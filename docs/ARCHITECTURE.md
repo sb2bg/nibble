@@ -19,9 +19,11 @@ same amount.
 - `Mbc` owns mapper registers, address translation, MBC2 internal nibble RAM,
   and the deterministic MBC3 RTC. Mapper snapshots intentionally exclude ROM
   and external-RAM pointers.
-- `Ppu` owns scan timing, window-line state, and the frame buffer. Rendering is
-  scanline-based; SDL presentation and input still live here and are the main
-  remaining boundary worth splitting when the frontend grows.
+- `Ppu` owns scan timing, window-line state, and the logical DMG frame buffer.
+  It emits a frame-ready edge but has no dependency on SDL or host input.
+- `SdlFrontend` owns the host window, texture conversion, keyboard mapping, and
+  management UI. It is optional; graphical and headless runs execute the same
+  PPU core.
 
 Save states snapshot component-owned state, while immutable ROM data and owned
 allocations remain in place. Any newly persistent hardware field should be added

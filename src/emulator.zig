@@ -13,6 +13,8 @@ const PpuMode = ppu_mod.PpuMode;
 const DmgColor = ppu_mod.DmgColor;
 const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
 const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
+const frontend_mod = @import("frontend/sdl_frontend.zig");
+const SdlFrontend = frontend_mod.SdlFrontend;
 
 pub const EmulatorOptions = struct {
     debug: bool = false,
@@ -68,6 +70,7 @@ const PpuState = struct {
     ly: u8,
     window_line: u8,
     enabled: bool,
+    frame_ready: bool,
 };
 
 const SaveState = struct {
@@ -82,6 +85,7 @@ pub const Emulator = struct {
     cpu: Cpu,
     bus: Bus,
     ppu: Ppu,
+    frontend: ?SdlFrontend,
     options: EmulatorOptions,
 
     // Runtime state
@@ -100,23 +104,24 @@ pub const Emulator = struct {
         var cartridge = try Cartridge.load(allocator, io, rom_path);
         errdefer cartridge.deinit();
 
-        // Initialize PPU. In headless mode (or if SDL fails), keep a logic-only
-        // PPU active so LY/STAT/VBlank timing still advances.
-        var ppu: Ppu = if (options.headless)
-            Ppu.initHeadless()
-        else
-            Ppu.init() catch |err| blk: {
-                std.debug.print("Warning: Failed to initialize SDL PPU: {any}\n", .{err});
-                std.debug.print("Falling back to headless PPU timing\n", .{});
-                break :blk Ppu.initHeadless();
+        // The PPU is always present. SDL is an optional host adapter, so a
+        // missing display can never disable LY/STAT/VBlank behavior.
+        var frontend: ?SdlFrontend = null;
+        if (!options.headless) {
+            frontend = SdlFrontend.init() catch |err| blk: {
+                std.debug.print("Warning: Failed to initialize SDL frontend: {any}\n", .{err});
+                std.debug.print("Falling back to headless execution\n", .{});
+                break :blk null;
             };
-        errdefer ppu.deinit();
+        }
+        errdefer if (frontend) |*active| active.deinit();
 
         return Emulator{
             .io = io,
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
-            .ppu = ppu,
+            .ppu = Ppu.init(),
+            .frontend = frontend,
             .options = options,
             .steps = 0,
             .running = false,
@@ -124,7 +129,7 @@ pub const Emulator = struct {
     }
 
     pub fn deinit(self: *Emulator) void {
-        self.ppu.deinit();
+        if (self.frontend) |*frontend| frontend.deinit();
         self.bus.deinit();
     }
 
@@ -151,7 +156,10 @@ pub const Emulator = struct {
 
         while (self.running) {
             // Check UI events and hotkeys
-            const actions = self.ppu.pollEvents(&self.bus);
+            const actions: frontend_mod.UiActions = if (self.frontend) |*frontend|
+                frontend.pollEvents(&self.bus)
+            else
+                .{};
             if (actions.quit) break;
             self.handleUiActions(actions);
             self.syncUiStatus();
@@ -240,6 +248,9 @@ pub const Emulator = struct {
         }
 
         self.ppu.tick(cycles, &self.bus);
+        if (self.ppu.takeFrameReady()) {
+            if (self.frontend) |*frontend| frontend.present(&self.ppu.frame_buffer);
+        }
 
         self.bus.tickTimer(cycles);
         self.bus.tickDma(cycles);
@@ -247,15 +258,15 @@ pub const Emulator = struct {
     }
 
     fn maybeRedrawUi(self: *Emulator) void {
-        if (!self.ppu.sdl_initialized) return;
+        const frontend = if (self.frontend) |*active| active else return;
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
-            self.ppu.redraw();
+            frontend.redraw(&self.ppu.frame_buffer);
             self.last_ui_redraw_ns = now;
         }
     }
 
-    fn handleUiActions(self: *Emulator, actions: ppu_mod.UiActions) void {
+    fn handleUiActions(self: *Emulator, actions: frontend_mod.UiActions) void {
         if (actions.prev_slot) {
             const slot = (@as(usize, self.active_save_slot) + SAVE_SLOT_COUNT - 1) % SAVE_SLOT_COUNT;
             self.active_save_slot = @intCast(slot);
@@ -289,8 +300,9 @@ pub const Emulator = struct {
     }
 
     fn syncUiStatus(self: *Emulator) void {
+        const frontend = if (self.frontend) |*active| active else return;
         const slot_has_state = self.save_slots[self.active_save_slot] != null;
-        self.ppu.setUiStatus(
+        frontend.setUiStatus(
             self.paused,
             self.active_save_slot,
             slot_has_state,
@@ -330,6 +342,7 @@ pub const Emulator = struct {
                 .ly = self.ppu.ly,
                 .window_line = self.ppu.window_line,
                 .enabled = self.ppu.enabled,
+                .frame_ready = self.ppu.frame_ready,
             },
             .steps = self.steps,
         };
@@ -369,7 +382,8 @@ pub const Emulator = struct {
         self.ppu.ly = slot_state.ppu.ly;
         self.ppu.window_line = slot_state.ppu.window_line;
         self.ppu.enabled = slot_state.ppu.enabled;
-        self.ppu.redraw();
+        self.ppu.frame_ready = slot_state.ppu.frame_ready;
+        if (self.frontend) |*frontend| frontend.redraw(&self.ppu.frame_buffer);
 
         self.steps = slot_state.steps;
         self.paused = false;

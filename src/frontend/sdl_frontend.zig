@@ -1,0 +1,220 @@
+const std = @import("std");
+const sdl = @import("../sdl.zig");
+const ppu_mod = @import("../ppu/ppu.zig");
+const DmgColor = ppu_mod.DmgColor;
+const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
+const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
+
+const WINDOW_SCALE = 3;
+
+pub const UiActions = struct {
+    quit: bool = false,
+    toggle_pause: bool = false,
+    reset: bool = false,
+    save_state: bool = false,
+    load_state: bool = false,
+    prev_slot: bool = false,
+    next_slot: bool = false,
+};
+
+/// SDL owns host presentation and input. It deliberately has no authority
+/// over PPU timing, which keeps the emulation core usable in tests/headless runs.
+pub const SdlFrontend = struct {
+    window: *sdl.Window,
+    renderer: *sdl.Renderer,
+    texture: *sdl.Texture,
+
+    ui_paused: bool = false,
+    ui_slot: u8 = 0,
+    ui_slot_has_state: bool = false,
+    ui_message: [48]u8 = [_]u8{0} ** 48,
+    ui_message_len: usize = 0,
+
+    prev_pause_key: bool = false,
+    prev_reset_key: bool = false,
+    prev_save_key: bool = false,
+    prev_load_key: bool = false,
+    prev_prev_slot_key: bool = false,
+    prev_next_slot_key: bool = false,
+    prev_quit_key: bool = false,
+
+    pub fn init() !SdlFrontend {
+        sdl.init(sdl.INIT_VIDEO) catch {
+            std.debug.print("SDL_Init Error: {s}\n", .{sdl.getError()});
+            return error.SdlInitFailed;
+        };
+        errdefer sdl.quit();
+
+        const window = sdl.createWindow(
+            "Nibble",
+            sdl.WINDOWPOS_CENTERED,
+            sdl.WINDOWPOS_CENTERED,
+            SCREEN_WIDTH * WINDOW_SCALE,
+            SCREEN_HEIGHT * WINDOW_SCALE,
+            sdl.WINDOW_SHOWN,
+        ) catch {
+            std.debug.print("SDL_CreateWindow Error: {s}\n", .{sdl.getError()});
+            return error.SdlWindowFailed;
+        };
+        errdefer sdl.destroyWindow(window);
+
+        const renderer = sdl.createRenderer(window, -1, sdl.RENDERER_ACCELERATED) catch {
+            std.debug.print("SDL_CreateRenderer Error: {s}\n", .{sdl.getError()});
+            return error.SdlRendererFailed;
+        };
+        errdefer sdl.destroyRenderer(renderer);
+
+        const texture = sdl.createTexture(
+            renderer,
+            sdl.PIXELFORMAT_RGB888,
+            sdl.TEXTUREACCESS_STREAMING,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT,
+        ) catch {
+            std.debug.print("SDL_CreateTexture Error: {s}\n", .{sdl.getError()});
+            return error.SdlTextureFailed;
+        };
+
+        var frontend: SdlFrontend = .{
+            .window = window,
+            .renderer = renderer,
+            .texture = texture,
+        };
+        frontend.refreshWindowTitle();
+        return frontend;
+    }
+
+    pub fn deinit(self: *SdlFrontend) void {
+        sdl.destroyTexture(self.texture);
+        sdl.destroyRenderer(self.renderer);
+        sdl.destroyWindow(self.window);
+        sdl.quit();
+    }
+
+    pub fn present(self: *SdlFrontend, frame: *const [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor) void {
+        var pixels: [SCREEN_HEIGHT * SCREEN_WIDTH * 4]u8 =
+            [_]u8{0} ** (SCREEN_HEIGHT * SCREEN_WIDTH * 4);
+
+        for (0..SCREEN_HEIGHT) |y| {
+            for (0..SCREEN_WIDTH) |x| {
+                const offset = (y * SCREEN_WIDTH + x) * 4;
+                const rgb = toRgb(frame[y][x]);
+                pixels[offset + 0] = @intCast((rgb >> 16) & 0xFF);
+                pixels[offset + 1] = @intCast((rgb >> 8) & 0xFF);
+                pixels[offset + 2] = @intCast(rgb & 0xFF);
+                pixels[offset + 3] = 0xFF;
+            }
+        }
+
+        sdl.updateTexture(self.texture, null, pixels[0..], SCREEN_WIDTH * 4) catch {};
+        sdl.renderClear(self.renderer) catch {};
+        sdl.renderCopy(self.renderer, self.texture, null, null) catch {};
+        sdl.renderPresent(self.renderer);
+    }
+
+    pub fn pollEvents(self: *SdlFrontend, bus: anytype) UiActions {
+        var actions: UiActions = .{};
+
+        var event: sdl.Event = undefined;
+        while (sdl.pollEvent(&event)) {
+            if (event.type == sdl.QUIT) actions.quit = true;
+        }
+
+        sdl.pumpEvents();
+        const keys = sdl.getKeyboardState();
+
+        var state: u8 = 0xFF;
+        if (keys.len != 0) {
+            if (isPressed(keys, sdl.SCANCODE_RIGHT)) state &= ~@as(u8, 0x01);
+            if (isPressed(keys, sdl.SCANCODE_LEFT)) state &= ~@as(u8, 0x02);
+            if (isPressed(keys, sdl.SCANCODE_UP)) state &= ~@as(u8, 0x04);
+            if (isPressed(keys, sdl.SCANCODE_DOWN)) state &= ~@as(u8, 0x08);
+            if (isPressed(keys, sdl.SCANCODE_X) or isPressed(keys, sdl.SCANCODE_A)) state &= ~@as(u8, 0x10);
+            if (isPressed(keys, sdl.SCANCODE_Z) or isPressed(keys, sdl.SCANCODE_S)) state &= ~@as(u8, 0x20);
+            if (isPressed(keys, sdl.SCANCODE_BACKSPACE) or isPressed(keys, sdl.SCANCODE_TAB)) state &= ~@as(u8, 0x40);
+            if (isPressed(keys, sdl.SCANCODE_RETURN) or isPressed(keys, sdl.SCANCODE_KP_ENTER) or isPressed(keys, sdl.SCANCODE_SPACE)) state &= ~@as(u8, 0x80);
+        }
+        bus.io.setJoypadState(state);
+
+        if (keys.len != 0) {
+            actions.quit = actions.quit or edgePressed(&self.prev_quit_key, isPressed(keys, sdl.SCANCODE_ESCAPE));
+            actions.toggle_pause = edgePressed(&self.prev_pause_key, isPressed(keys, sdl.SCANCODE_P));
+            actions.reset = edgePressed(&self.prev_reset_key, isPressed(keys, sdl.SCANCODE_R));
+            actions.save_state = edgePressed(&self.prev_save_key, isPressed(keys, sdl.SCANCODE_F5));
+            actions.load_state = edgePressed(&self.prev_load_key, isPressed(keys, sdl.SCANCODE_F9));
+            actions.prev_slot = edgePressed(&self.prev_prev_slot_key, isPressed(keys, sdl.SCANCODE_LEFTBRACKET));
+            actions.next_slot = edgePressed(&self.prev_next_slot_key, isPressed(keys, sdl.SCANCODE_RIGHTBRACKET));
+        } else {
+            self.prev_quit_key = false;
+            self.prev_pause_key = false;
+            self.prev_reset_key = false;
+            self.prev_save_key = false;
+            self.prev_load_key = false;
+            self.prev_prev_slot_key = false;
+            self.prev_next_slot_key = false;
+        }
+
+        return actions;
+    }
+
+    pub fn setUiStatus(
+        self: *SdlFrontend,
+        paused: bool,
+        slot: u8,
+        slot_has_state: bool,
+        message: []const u8,
+    ) void {
+        self.ui_paused = paused;
+        self.ui_slot = slot;
+        self.ui_slot_has_state = slot_has_state;
+        self.ui_message_len = @min(message.len, self.ui_message.len);
+        if (self.ui_message_len > 0) {
+            @memcpy(self.ui_message[0..self.ui_message_len], message[0..self.ui_message_len]);
+        }
+        self.refreshWindowTitle();
+    }
+
+    pub fn redraw(self: *SdlFrontend, frame: *const [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor) void {
+        self.refreshWindowTitle();
+        self.present(frame);
+    }
+
+    fn refreshWindowTitle(self: *SdlFrontend) void {
+        var title_buf: [128:0]u8 = undefined;
+        const state = if (self.ui_paused) "Paused" else "Running";
+        const slot_state = if (self.ui_slot_has_state) "set" else "empty";
+        const title = if (self.ui_message_len > 0)
+            std.fmt.bufPrintZ(
+                &title_buf,
+                "Nibble | {s} | Slot {d} {s} | {s}",
+                .{ state, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
+            ) catch "Nibble"
+        else
+            std.fmt.bufPrintZ(
+                &title_buf,
+                "Nibble | {s} | Slot {d} {s}",
+                .{ state, self.ui_slot, slot_state },
+            ) catch "Nibble";
+
+        sdl.setWindowTitle(self.window, title);
+    }
+
+    fn edgePressed(previous: *bool, current: bool) bool {
+        const pressed = current and !previous.*;
+        previous.* = current;
+        return pressed;
+    }
+
+    fn isPressed(keys: []const u8, scancode: usize) bool {
+        return scancode < keys.len and keys[scancode] != 0;
+    }
+
+    fn toRgb(color: DmgColor) u32 {
+        return switch (color) {
+            .White => 0xE0F8D0,
+            .LightGray => 0x88C070,
+            .DarkGray => 0x346856,
+            .Black => 0x081820,
+        };
+    }
+};
