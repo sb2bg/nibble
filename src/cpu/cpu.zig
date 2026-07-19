@@ -1047,7 +1047,14 @@ pub const Cpu = struct {
         // Normal instruction execution
         const opcode_pc = self.pc;
         const inst = self.decode(bus);
-        if (self.reader_ctx.interrupt_pending_after_opcode) {
+        const interrupt_inhibited_by_instruction = switch (inst) {
+            // On DMG, DI takes effect soon enough to cancel an interrupt that
+            // becomes pending during DI's own opcode fetch. Other opcodes are
+            // discarded when the same fetch-boundary race occurs.
+            .di => true,
+            else => false,
+        };
+        if (self.reader_ctx.interrupt_pending_after_opcode and !interrupt_inhibited_by_instruction) {
             // The opcode-fetch M-cycle is part of interrupt dispatch, so the
             // interrupted instruction remains the return address.
             self.pc = opcode_pc;
@@ -1108,6 +1115,38 @@ test "interrupt raised during opcode fetch discards the instruction" {
     try std.testing.expectEqual(@as(u16, 0x1234), cpu.bc);
     try std.testing.expectEqual(@as(u16, 0x0050), cpu.pc);
     try std.testing.expectEqual(@as(u16, 0xC000), bus.read16(cpu.sp));
+}
+
+test "DI inhibits an interrupt raised during its opcode fetch" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0xC000;
+    cpu.ime = true;
+    bus.wram[0] = 0xF3; // DI must execute rather than being discarded.
+    bus.ie_register = Interrupt.TIMER;
+
+    const Hook = struct {
+        bus: *Bus,
+        fired: bool = false,
+
+        fn tick(ptr: *anyopaque, _: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.fired) return;
+            self.fired = true;
+            self.bus.io.requestInterrupt(Interrupt.TIMER);
+        }
+    };
+    var hook = Hook{ .bus = &bus };
+    bus.setCycleHook(.{ .context = @ptrCast(&hook), .tickFn = Hook.tick });
+
+    try std.testing.expectEqual(@as(u8, 4), cpu.step(&bus));
+    try std.testing.expect(!cpu.ime);
+    try std.testing.expectEqual(@as(u16, 0xC001), cpu.pc);
+    try std.testing.expect((bus.io.data[@intFromEnum(IoReg.IF)] & Interrupt.TIMER) != 0);
 }
 
 test "consecutive EI instructions do not postpone IME" {
