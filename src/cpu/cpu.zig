@@ -50,6 +50,8 @@ pub const Cpu = struct {
     const ReaderContext = struct {
         cpu: *Cpu,
         bus: *const Bus,
+        bytes_read: u8 = 0,
+        interrupt_pending_after_opcode: bool = false,
     };
 
     /// Initialize CPU to post-boot ROM state (DMG)
@@ -260,7 +262,18 @@ pub const Cpu = struct {
 
             fn read(ptr: *anyopaque) u8 {
                 const ctx: *@This() = @ptrCast(@alignCast(ptr));
-                return ctx.cpu.fetch(ctx.bus);
+                // Interrupts are sampled at the opcode-fetch boundary. Once a
+                // fetch observes a newly pending enabled interrupt, decode may
+                // ask for immediate bytes, but those bytes must not consume
+                // bus cycles because the opcode will be discarded.
+                if (ctx.cpu.reader_ctx.interrupt_pending_after_opcode) return 0;
+
+                const value = ctx.cpu.fetch(ctx.bus);
+                ctx.cpu.reader_ctx.bytes_read += 1;
+                if (ctx.cpu.reader_ctx.bytes_read == 1 and ctx.cpu.ime and pendingInterrupts(ctx.bus) != 0) {
+                    ctx.cpu.reader_ctx.interrupt_pending_after_opcode = true;
+                }
+                return value;
             }
         };
 
@@ -992,7 +1005,16 @@ pub const Cpu = struct {
         }
 
         // Normal instruction execution
+        const opcode_pc = self.pc;
         const inst = self.decode(bus);
+        if (self.reader_ctx.interrupt_pending_after_opcode) {
+            // The opcode-fetch M-cycle is part of interrupt dispatch, so the
+            // interrupted instruction remains the return address.
+            self.pc = opcode_pc;
+            const int_cycles = self.handleInterrupts(bus).?;
+            self.cycles += int_cycles;
+            return int_cycles;
+        }
         const cycles = self.execute(inst, bus);
         self.tickImeEnableDelay();
         self.cycles += cycles;
@@ -1013,4 +1035,37 @@ test "STOP consumes an armed CGB speed switch instead of halting" {
 
     try std.testing.expect(!cpu.halted);
     try std.testing.expectEqual(@as(u8, 0x80), bus.io.data[@intFromEnum(IoReg.KEY1)]);
+}
+
+test "interrupt raised during opcode fetch discards the instruction" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0xC000;
+    cpu.bc = 0x1234;
+    cpu.ime = true;
+    bus.wram[0] = 0x0B; // DEC BC must not execute.
+    bus.ie_register = Interrupt.TIMER;
+
+    const Hook = struct {
+        bus: *Bus,
+        fired: bool = false,
+
+        fn tick(ptr: *anyopaque, _: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.fired) return;
+            self.fired = true;
+            self.bus.io.requestInterrupt(Interrupt.TIMER);
+        }
+    };
+    var hook = Hook{ .bus = &bus };
+    bus.setCycleHook(.{ .context = @ptrCast(&hook), .tickFn = Hook.tick });
+
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0x1234), cpu.bc);
+    try std.testing.expectEqual(@as(u16, 0x0050), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xC000), bus.read16(cpu.sp));
 }
