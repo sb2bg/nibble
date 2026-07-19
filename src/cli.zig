@@ -6,6 +6,7 @@ pub const Options = struct {
     max_steps: ?usize = null,
     breakpoint: ?u16 = null,
     headless: bool = false,
+    mooneye_test: bool = false,
     rom_path: ?[]const u8 = null,
 };
 
@@ -41,6 +42,10 @@ pub fn parse(args: []const []const u8) ParseError!Options {
         }
         if (options_enabled and std.mem.eql(u8, arg, "--headless")) {
             options.headless = true;
+            continue;
+        }
+        if (options_enabled and std.mem.eql(u8, arg, "--mooneye-test")) {
+            options.mooneye_test = true;
             continue;
         }
         if (options_enabled and (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--steps"))) {
@@ -82,9 +87,10 @@ fn parseAddress(text: []const u8) !u16 {
 }
 
 test "parse command-line options" {
-    const options = try parse(&.{ "-d", "--steps=250", "-b", "0x0150", "--headless", "game.gb" });
+    const options = try parse(&.{ "-d", "--steps=250", "-b", "0x0150", "--headless", "--mooneye-test", "game.gb" });
     try std.testing.expect(options.debug);
     try std.testing.expect(options.headless);
+    try std.testing.expect(options.mooneye_test);
     try std.testing.expectEqual(@as(?usize, 250), options.max_steps);
     try std.testing.expectEqual(@as(?u16, 0x0150), options.breakpoint);
     try std.testing.expectEqualStrings("game.gb", options.rom_path.?);

@@ -56,6 +56,9 @@ zig build run -- --headless -s 100000 roms/blargg/cpu_instrs/cpu_instrs.gb
 
 # debug trace mode
 zig build run -- -d -s 1000 roms/blargg/cpu_instrs/cpu_instrs.gb
+
+# run a Mooneye acceptance ROM and return a test-friendly exit status
+zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 ```
 
 CLI options:
@@ -64,6 +67,8 @@ CLI options:
 - `-s`, `--steps <COUNT>`: stop after a maximum number of steps
 - `-b`, `--breakpoint <HEX>`: stop when `PC == HEX` (with or without a `0x` prefix)
 - `--headless`: run without graphics
+- `--mooneye-test`: run headlessly until Mooneye reports pass/fail (exit 0/1,
+  or 2 after the default 10-million-instruction timeout)
 
 Controls (default):
 - D-pad: Arrow keys
@@ -94,6 +99,8 @@ zig build test
 ```
 
 Test and reference ROMs are available under `roms/` (for example `roms/blargg/` and `roms/scribbltests/`).
+Mooneye binaries are downloaded separately rather than vendored; its documented
+register protocol is supported directly by `--mooneye-test`.
 
 ## Project layout
 

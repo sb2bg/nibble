@@ -18,6 +18,12 @@ pub const EmulatorOptions = struct {
     max_steps: ?usize = null, // null means run indefinitely
     breakpoint: ?u16 = null,
     headless: bool = false, // Run without graphics (for testing)
+    mooneye_test: bool = false,
+};
+
+pub const MooneyeResult = enum {
+    passed,
+    failed,
 };
 
 const SAVE_SLOT_COUNT = 10;
@@ -187,8 +193,34 @@ pub const Emulator = struct {
                 }
             }
 
+            if (self.options.mooneye_test and self.mooneyeResult() != null) break;
+
             self.step();
         }
+    }
+
+    /// Detect Mooneye's hardware-test result protocol. The register signature
+    /// is only meaningful once the ROM reaches its `LD B,B; JR -2` stop loop;
+    /// checking both avoids mistaking an intermediate Fibonacci value for a
+    /// completed test.
+    pub fn mooneyeResult(self: *const Emulator) ?MooneyeResult {
+        const pc = self.cpu.pc;
+        if (pc > std.math.maxInt(u16) - 2) return null;
+        if (self.bus.read(pc) != 0x40 or
+            self.bus.read(pc + 1) != 0x18 or
+            self.bus.read(pc + 2) != 0xFE)
+        {
+            return null;
+        }
+
+        return classifyMooneyeRegisters(.{
+            self.cpu.b(),
+            self.cpu.c(),
+            self.cpu.d(),
+            self.cpu.e(),
+            self.cpu.h(),
+            self.cpu.l(),
+        });
     }
 
     /// Execute a single CPU step and tick other components
@@ -545,3 +577,15 @@ pub const Emulator = struct {
         std.debug.print("\n", .{});
     }
 };
+
+fn classifyMooneyeRegisters(registers: [6]u8) ?MooneyeResult {
+    if (std.mem.eql(u8, &registers, &.{ 3, 5, 8, 13, 21, 34 })) return .passed;
+    if (std.mem.allEqual(u8, &registers, 0x42)) return .failed;
+    return null;
+}
+
+test "Mooneye result register signatures" {
+    try std.testing.expectEqual(MooneyeResult.passed, classifyMooneyeRegisters(.{ 3, 5, 8, 13, 21, 34 }).?);
+    try std.testing.expectEqual(MooneyeResult.failed, classifyMooneyeRegisters(.{ 0x42, 0x42, 0x42, 0x42, 0x42, 0x42 }).?);
+    try std.testing.expectEqual(@as(?MooneyeResult, null), classifyMooneyeRegisters(.{ 3, 5, 8, 13, 21, 33 }));
+}
