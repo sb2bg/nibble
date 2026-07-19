@@ -46,6 +46,7 @@ extern fn SDL_GetError() [*:0]const u8;
 
 extern fn SDL_CreateWindow(title: [*:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int, flags: u32) ?*Window;
 extern fn SDL_DestroyWindow(window: *Window) void;
+extern fn SDL_SetWindowTitle(window: *Window, title: [*:0]const u8) void;
 
 extern fn SDL_CreateRenderer(window: *Window, index: c_int, flags: u32) ?*Renderer;
 extern fn SDL_DestroyRenderer(renderer: *Renderer) void;
@@ -60,7 +61,6 @@ extern fn SDL_RenderClear(renderer: *Renderer) c_int;
 extern fn SDL_PollEvent(event: *Event) c_int;
 extern fn SDL_GetKeyboardState(numkeys: ?*c_int) [*c]const u8;
 extern fn SDL_PumpEvents() void;
-extern fn SDL_GetMouseState(x: *c_int, y: *c_int) u32;
 
 // Keyboard scancodes we map to DMG controls
 pub const SCANCODE_X: usize = 27; // A
@@ -81,11 +81,8 @@ pub const SCANCODE_P: usize = 19;
 pub const SCANCODE_R: usize = 21;
 pub const SCANCODE_LEFTBRACKET: usize = 47;
 pub const SCANCODE_RIGHTBRACKET: usize = 48;
-pub const SCANCODE_F1: usize = 58;
 pub const SCANCODE_F5: usize = 62;
 pub const SCANCODE_F9: usize = 66;
-
-pub const BUTTON_LMASK: u32 = 0x01;
 
 // Zig-friendly wrappers
 pub fn init(flags: u32) !void {
@@ -108,6 +105,10 @@ pub fn createWindow(title: [:0]const u8, x: c_int, y: c_int, w: c_int, h: c_int,
 
 pub fn destroyWindow(window: *Window) void {
     SDL_DestroyWindow(window);
+}
+
+pub fn setWindowTitle(window: *Window, title: [:0]const u8) void {
+    SDL_SetWindowTitle(window, title.ptr);
 }
 
 pub fn createRenderer(window: *Window, index: c_int, flags: u32) !*Renderer {
@@ -161,8 +162,4 @@ pub fn getKeyboardState() []const u8 {
     const ptr = SDL_GetKeyboardState(&key_count);
     if (ptr == null or key_count <= 0) return &[_]u8{};
     return ptr[0..@intCast(key_count)];
-}
-
-pub fn getMouseState(x: *c_int, y: *c_int) u32 {
-    return SDL_GetMouseState(x, y);
 }

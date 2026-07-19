@@ -347,7 +347,22 @@ pub const Cpu = struct {
                 }
                 break :blk 4;
             },
-            .stop => 4, // TODO: implement properly
+            .stop => blk: {
+                const key1_index = @intFromEnum(IoReg.KEY1);
+                if ((bus.io.data[key1_index] & 0x01) != 0) {
+                    // On CGB, an armed KEY1 makes STOP switch CPU speed and
+                    // resume instead of entering low-power mode. Full CGB
+                    // double-speed scheduling is outside the current DMG
+                    // model, but consuming the request is required by CGB-
+                    // compatible test ROMs.
+                    bus.io.data[key1_index] = (bus.io.data[key1_index] ^ 0x80) & 0x80;
+                } else {
+                    // DMG STOP wake sources are not yet modeled separately
+                    // from HALT interrupts.
+                    self.halted = true;
+                }
+                break :blk 4;
+            },
             .di => blk: {
                 self.ime = false;
                 self.ime_enable_delay = 0;
@@ -984,3 +999,18 @@ pub const Cpu = struct {
         return cycles;
     }
 };
+
+test "STOP consumes an armed CGB speed switch instead of halting" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+
+    bus.write(0xFF4D, 1);
+    _ = cpu.execute(.stop, &bus);
+
+    try std.testing.expect(!cpu.halted);
+    try std.testing.expectEqual(@as(u8, 0x80), bus.io.data[@intFromEnum(IoReg.KEY1)]);
+}

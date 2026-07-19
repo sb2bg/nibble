@@ -1,9 +1,12 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Cpu = @import("cpu/cpu.zig").Cpu;
-const Bus = @import("memory/bus.zig").Bus;
+const bus_mod = @import("memory/bus.zig");
+const Bus = bus_mod.Bus;
+const Dma = bus_mod.Dma;
 const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 const Timer = @import("timer.zig").Timer;
+const Mbc = @import("memory/mbc.zig").Mbc;
 const ppu_mod = @import("ppu/ppu.zig");
 const Ppu = ppu_mod.Ppu;
 const PpuMode = ppu_mod.PpuMode;
@@ -35,29 +38,12 @@ const CpuState = struct {
     cycles: u64,
 };
 
-const TimerState = struct {
-    div_counter: u16,
-    tima_counter: u16,
-    prev_and_result: bool,
-};
-
 const IoState = struct {
     data: [0x80]u8,
-    div_counter: u16,
     joypad_select: u8,
     joypad_buttons: u8,
-    dma_active: bool,
-    dma_source: u16,
-    dma_offset: u8,
-    dma_delay: u8,
     oam_scan_row: u8,
-};
-
-const MbcState = struct {
-    rom_bank: u16,
-    ram_bank: u8,
-    ram_enabled: bool,
-    banking_mode: u1,
+    stat_irq_line: bool,
 };
 
 const BusState = struct {
@@ -67,7 +53,9 @@ const BusState = struct {
     vram: [0x2000]u8,
     io: IoState,
     ie_register: u8,
-    mbc: MbcState,
+    timer: Timer,
+    dma: Dma,
+    mbc: Mbc.Snapshot,
     cart_ram_len: usize,
     cart_ram: [MAX_CART_RAM_BYTES]u8,
 };
@@ -76,31 +64,29 @@ const PpuState = struct {
     frame_buffer: [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor,
     mode: PpuMode,
     mode_cycles: u32,
+    mode3_duration: u16,
     ly: u8,
+    window_line: u8,
     enabled: bool,
 };
 
 const SaveState = struct {
     cpu: CpuState,
-    timer: TimerState,
     bus: BusState,
-    ppu: ?PpuState,
+    ppu: PpuState,
     steps: usize,
 };
 
 pub const Emulator = struct {
-    allocator: Allocator,
     cpu: Cpu,
     bus: Bus,
-    timer: Timer,
-    ppu: ?Ppu,
+    ppu: Ppu,
     options: EmulatorOptions,
 
     // Runtime state
     steps: usize = 0,
     running: bool = false,
     paused: bool = false,
-    ui_show_panel: bool = true,
     active_save_slot: u8 = 0,
     status_message: [48]u8 = [_]u8{0} ** 48,
     status_message_len: usize = 0,
@@ -115,7 +101,7 @@ pub const Emulator = struct {
 
         // Initialize PPU. In headless mode (or if SDL fails), keep a logic-only
         // PPU active so LY/STAT/VBlank timing still advances.
-        const ppu: ?Ppu = if (options.headless)
+        var ppu: Ppu = if (options.headless)
             Ppu.initHeadless()
         else
             Ppu.init() catch |err| blk: {
@@ -123,13 +109,11 @@ pub const Emulator = struct {
                 std.debug.print("Falling back to headless PPU timing\n", .{});
                 break :blk Ppu.initHeadless();
             };
-        errdefer if (ppu) |*p| p.deinit();
+        errdefer ppu.deinit();
 
         return Emulator{
-            .allocator = allocator,
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
-            .timer = Timer.init(),
             .ppu = ppu,
             .options = options,
             .steps = 0,
@@ -138,7 +122,7 @@ pub const Emulator = struct {
     }
 
     pub fn deinit(self: *Emulator) void {
-        if (self.ppu) |*p| p.deinit();
+        self.ppu.deinit();
         self.bus.deinit();
     }
 
@@ -159,28 +143,22 @@ pub const Emulator = struct {
         }
 
         // Enable PPU if LCDC bit 7 is set
-        if (self.ppu) |*ppu| {
-            const lcdc = self.bus.io.getLcdc();
-            ppu.setEnabled((lcdc & 0x80) != 0);
-        }
-        self.syncUiPanelState();
+        const lcdc = self.bus.io.getLcdc();
+        self.ppu.setEnabled((lcdc & 0x80) != 0);
+        self.syncUiStatus();
 
         while (self.running) {
             // Check UI events and hotkeys
-            if (self.ppu) |*ppu| {
-                const actions = ppu.pollEvents(&self.bus);
-                if (actions.quit) break;
-                self.handleUiActions(actions);
-            }
-            self.syncUiPanelState();
+            const actions = self.ppu.pollEvents(&self.bus);
+            if (actions.quit) break;
+            self.handleUiActions(actions);
+            self.syncUiStatus();
             self.maybeRedrawUi();
 
             if (self.paused) {
                 std.Thread.sleep(8 * std.time.ns_per_ms);
                 continue;
             }
-
-            self.step();
 
             // Check max steps limit
             if (self.options.max_steps) |max| {
@@ -201,6 +179,8 @@ pub const Emulator = struct {
                     break;
                 }
             }
+
+            self.step();
         }
     }
 
@@ -246,38 +226,34 @@ pub const Emulator = struct {
     fn tickPeripherals(self: *Emulator, cycles: u8) void {
         if (cycles == 0) return;
 
-        if (self.ppu) |*ppu| {
-            // Update PPU enabled state from LCDC
-            const lcdc = self.bus.io.getLcdc();
-            ppu.setEnabled((lcdc & 0x80) != 0);
+        // Update PPU enabled state from LCDC.
+        const lcdc = self.bus.io.getLcdc();
+        self.ppu.setEnabled((lcdc & 0x80) != 0);
+        self.bus.io.setPpuMode(@intFromEnum(self.ppu.mode));
 
-            if ((lcdc & 0x80) == 0) {
-                // LY reads as 0 while LCD is disabled.
-                self.bus.io.setLy(0);
-            }
-
-            ppu.tick(cycles, &self.bus);
+        if ((lcdc & 0x80) == 0) {
+            // LY reads as 0 while LCD is disabled.
+            self.bus.io.setLy(0);
+            self.bus.io.setPpuMode(0);
         }
 
-        self.timer.tick(cycles, &self.bus.io);
+        self.ppu.tick(cycles, &self.bus);
+
+        self.bus.tickTimer(cycles);
+        self.bus.tickDma(cycles);
+        self.bus.cartridge.mbc.tick(cycles);
     }
 
     fn maybeRedrawUi(self: *Emulator) void {
-        if (self.ppu) |*ppu| {
-            if (!ppu.sdl_initialized) return;
-            const now = std.time.nanoTimestamp();
-            if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
-                ppu.redraw();
-                self.last_ui_redraw_ns = now;
-            }
+        if (!self.ppu.sdl_initialized) return;
+        const now = std.time.nanoTimestamp();
+        if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
+            self.ppu.redraw();
+            self.last_ui_redraw_ns = now;
         }
     }
 
     fn handleUiActions(self: *Emulator, actions: ppu_mod.UiActions) void {
-        if (actions.toggle_panel) {
-            self.ui_show_panel = !self.ui_show_panel;
-            self.setStatusMessage(if (self.ui_show_panel) "PANEL ON" else "PANEL OFF");
-        }
         if (actions.prev_slot) {
             const slot = (@as(usize, self.active_save_slot) + SAVE_SLOT_COUNT - 1) % SAVE_SLOT_COUNT;
             self.active_save_slot = @intCast(slot);
@@ -310,18 +286,14 @@ pub const Emulator = struct {
         }
     }
 
-    fn syncUiPanelState(self: *Emulator) void {
-        if (self.ppu) |*ppu| {
-            const slot_has_state = self.save_slots[self.active_save_slot] != null;
-            ppu.setUiPanelState(
-                self.paused,
-                self.active_save_slot,
-                slot_has_state,
-                self.bus.io.getJoypadState(),
-                self.ui_show_panel,
-                self.status_message[0..self.status_message_len],
-            );
-        }
+    fn syncUiStatus(self: *Emulator) void {
+        const slot_has_state = self.save_slots[self.active_save_slot] != null;
+        self.ppu.setUiStatus(
+            self.paused,
+            self.active_save_slot,
+            slot_has_state,
+            self.status_message[0..self.status_message_len],
+        );
     }
 
     fn setStatusMessage(self: *Emulator, message: []const u8) void {
@@ -347,19 +319,16 @@ pub const Emulator = struct {
                 .halt_bug = self.cpu.halt_bug,
                 .cycles = self.cpu.cycles,
             },
-            .timer = .{
-                .div_counter = self.timer.div_counter,
-                .tima_counter = self.timer.tima_counter,
-                .prev_and_result = self.timer.prev_and_result,
-            },
             .bus = self.captureBusState(),
-            .ppu = if (self.ppu) |*ppu| PpuState{
-                .frame_buffer = ppu.frame_buffer,
-                .mode = ppu.mode,
-                .mode_cycles = ppu.mode_cycles,
-                .ly = ppu.ly,
-                .enabled = ppu.enabled,
-            } else null,
+            .ppu = .{
+                .frame_buffer = self.ppu.frame_buffer,
+                .mode = self.ppu.mode,
+                .mode_cycles = self.ppu.mode_cycles,
+                .mode3_duration = self.ppu.mode3_duration,
+                .ly = self.ppu.ly,
+                .window_line = self.ppu.window_line,
+                .enabled = self.ppu.enabled,
+            },
             .steps = self.steps,
         };
 
@@ -389,22 +358,16 @@ pub const Emulator = struct {
         self.cpu.cycles = slot_state.cpu.cycles;
         self.cpu.reader_ctx = undefined;
 
-        self.timer.div_counter = slot_state.timer.div_counter;
-        self.timer.tima_counter = slot_state.timer.tima_counter;
-        self.timer.prev_and_result = slot_state.timer.prev_and_result;
-
         self.applyBusState(slot_state.bus);
 
-        if (self.ppu) |*ppu| {
-            if (slot_state.ppu) |ppu_state| {
-                ppu.frame_buffer = ppu_state.frame_buffer;
-                ppu.mode = ppu_state.mode;
-                ppu.mode_cycles = ppu_state.mode_cycles;
-                ppu.ly = ppu_state.ly;
-                ppu.enabled = ppu_state.enabled;
-            }
-            ppu.redraw();
-        }
+        self.ppu.frame_buffer = slot_state.ppu.frame_buffer;
+        self.ppu.mode = slot_state.ppu.mode;
+        self.ppu.mode_cycles = slot_state.ppu.mode_cycles;
+        self.ppu.mode3_duration = slot_state.ppu.mode3_duration;
+        self.ppu.ly = slot_state.ppu.ly;
+        self.ppu.window_line = slot_state.ppu.window_line;
+        self.ppu.enabled = slot_state.ppu.enabled;
+        self.ppu.redraw();
 
         self.steps = slot_state.steps;
         self.paused = false;
@@ -422,22 +385,15 @@ pub const Emulator = struct {
             .vram = self.bus.vram,
             .io = .{
                 .data = self.bus.io.data,
-                .div_counter = self.bus.io.div_counter,
                 .joypad_select = self.bus.io.joypad_select,
                 .joypad_buttons = self.bus.io.joypad_buttons,
-                .dma_active = self.bus.io.dma_active,
-                .dma_source = self.bus.io.dma_source,
-                .dma_offset = self.bus.io.dma_offset,
-                .dma_delay = self.bus.io.dma_delay,
                 .oam_scan_row = self.bus.io.oam_scan_row,
+                .stat_irq_line = self.bus.io.stat_irq_line,
             },
             .ie_register = self.bus.ie_register,
-            .mbc = .{
-                .rom_bank = self.bus.cartridge.mbc.rom_bank,
-                .ram_bank = self.bus.cartridge.mbc.ram_bank,
-                .ram_enabled = self.bus.cartridge.mbc.ram_enabled,
-                .banking_mode = self.bus.cartridge.mbc.banking_mode,
-            },
+            .timer = self.bus.timer,
+            .dma = self.bus.dma,
+            .mbc = self.bus.cartridge.mbc.snapshot(),
             .cart_ram_len = 0,
             .cart_ram = [_]u8{0} ** MAX_CART_RAM_BYTES,
         };
@@ -456,22 +412,17 @@ pub const Emulator = struct {
         self.bus.vram = state.vram;
 
         self.bus.io.data = state.io.data;
-        self.bus.io.div_counter = state.io.div_counter;
         self.bus.io.joypad_select = state.io.joypad_select;
         self.bus.io.joypad_buttons = state.io.joypad_buttons;
-        self.bus.io.dma_active = state.io.dma_active;
-        self.bus.io.dma_source = state.io.dma_source;
-        self.bus.io.dma_offset = state.io.dma_offset;
-        self.bus.io.dma_delay = state.io.dma_delay;
         self.bus.io.oam_scan_row = state.io.oam_scan_row;
+        self.bus.io.stat_irq_line = state.io.stat_irq_line;
         self.bus.io.serial_output.clearRetainingCapacity();
 
         self.bus.ie_register = state.ie_register;
+        self.bus.timer = state.timer;
+        self.bus.dma = state.dma;
 
-        self.bus.cartridge.mbc.rom_bank = state.mbc.rom_bank;
-        self.bus.cartridge.mbc.ram_bank = state.mbc.ram_bank;
-        self.bus.cartridge.mbc.ram_enabled = state.mbc.ram_enabled;
-        self.bus.cartridge.mbc.banking_mode = state.mbc.banking_mode;
+        self.bus.cartridge.mbc.restore(state.mbc);
 
         if (self.bus.cartridge.ram_data) |ram| {
             const len = @min(@min(ram.len, MAX_CART_RAM_BYTES), state.cart_ram_len);
@@ -489,8 +440,7 @@ pub const Emulator = struct {
     pub fn reset(self: *Emulator) void {
         self.cpu.reset();
         self.bus.reset();
-        self.timer.reset();
-        if (self.ppu) |*ppu| ppu.reset();
+        self.ppu.reset();
         self.steps = 0;
         self.paused = false;
         self.running = false;

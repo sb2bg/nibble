@@ -1,9 +1,26 @@
 const std = @import("std");
-const Mbc = @import("mbc.zig").Mbc;
-const MbcType = @import("mbc.zig").MbcType;
 const IoRegisters = @import("io.zig").IoRegisters;
 const IoReg = @import("io.zig").IoReg;
 const Cartridge = @import("../cartridge/cartridge.zig").Cartridge;
+const Timer = @import("../timer.zig").Timer;
+
+/// OAM DMA progresses one byte per M-cycle. On DMG, the CPU can only reach
+/// HRAM while a transfer is active; DMA's own source reads bypass that lockout.
+pub const Dma = struct {
+    active: bool = false,
+    source: u16 = 0,
+    next_byte: u8 = 0,
+    cycles_until_copy: u3 = 0,
+
+    fn start(self: *Dma, source_high: u8) void {
+        self.* = .{
+            .active = true,
+            .source = @as(u16, source_high) << 8,
+            .next_byte = 0,
+            .cycles_until_copy = 4,
+        };
+    }
+};
 
 /// Memory Bus - handles all memory reads and writes
 pub const Bus = struct {
@@ -21,6 +38,8 @@ pub const Bus = struct {
     // I/O and interrupts
     io: IoRegisters,
     ie_register: u8, // Interrupt Enable (0xFFFF)
+    timer: Timer,
+    dma: Dma,
 
     // Cartridge (owns ROM + RAM + MBC)
     cartridge: Cartridge,
@@ -36,6 +55,8 @@ pub const Bus = struct {
             .vram = [_]u8{0} ** 0x2000,
             .io = IoRegisters.init(allocator),
             .ie_register = 0,
+            .timer = Timer.init(),
+            .dma = .{},
             .cartridge = cartridge,
             .cycle_hook = null,
         };
@@ -54,6 +75,8 @@ pub const Bus = struct {
         @memset(&self.vram, 0);
         self.io.reset();
         self.ie_register = 0;
+        self.timer.reset(&self.io);
+        self.dma = .{};
         self.cartridge.mbc.reset();
     }
 
@@ -65,6 +88,28 @@ pub const Bus = struct {
         if (cycles == 0) return;
         if (self.cycle_hook) |hook| {
             hook.tickFn(hook.context, cycles);
+        }
+    }
+
+    pub fn tickTimer(self: *Bus, cycles: u8) void {
+        self.timer.tick(cycles, &self.io);
+    }
+
+    pub fn tickDma(self: *Bus, cycles: u8) void {
+        var remaining = cycles;
+        while (remaining > 0 and self.dma.active) : (remaining -= 1) {
+            self.dma.cycles_until_copy -= 1;
+            if (self.dma.cycles_until_copy != 0) continue;
+
+            const index = self.dma.next_byte;
+            self.oam[index] = self.readNoTick(self.dma.source + @as(u16, index));
+
+            if (index == 0x9F) {
+                self.dma.active = false;
+            } else {
+                self.dma.next_byte += 1;
+                self.dma.cycles_until_copy = 4;
+            }
         }
     }
 
@@ -100,6 +145,10 @@ pub const Bus = struct {
     inline fn isPpuOamBlocked(self: *const Bus) bool {
         const mode = self.io.getPpuMode();
         return mode == 2 or mode == 3;
+    }
+
+    inline fn isPpuVramBlocked(self: *const Bus) bool {
+        return self.io.getPpuMode() == 3;
     }
 
     inline fn isOamAddress(addr: u16) bool {
@@ -217,6 +266,14 @@ pub const Bus = struct {
     fn readInternal(self: *const Bus, addr: u16, count_cycle: bool) u8 {
         if (count_cycle) self.tickAccess();
 
+        if (count_cycle and self.dma.active and !isHramAddress(addr)) {
+            return 0xFF;
+        }
+
+        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramBlocked()) {
+            return 0xFF;
+        }
+
         if (isOamAddress(addr) and self.isPpuOamBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
@@ -266,6 +323,14 @@ pub const Bus = struct {
         const delay_tick_for_lcdc = count_cycle and addr == 0xFF40;
         if (count_cycle and !delay_tick_for_lcdc) self.tickAccess();
 
+        if (count_cycle and self.dma.active and !isHramAddress(addr)) {
+            return;
+        }
+
+        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramBlocked()) {
+            return;
+        }
+
         if (isOamMemoryAddress(addr) and self.isPpuOamBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
@@ -299,15 +364,14 @@ pub const Bus = struct {
             // I/O Registers
             0xFF00...0xFF7F => {
                 const io_addr: u8 = @truncate(addr - 0xFF00);
-                self.io.write(io_addr, val);
+                if (Timer.isRegister(io_addr)) {
+                    self.timer.writeRegister(&self.io, io_addr, val);
+                } else {
+                    self.io.write(io_addr, val);
+                }
 
-                // Execute OAM DMA immediately for functional correctness.
                 if (io_addr == @intFromEnum(IoReg.DMA)) {
-                    const source_base: u16 = @as(u16, val) << 8;
-                    var i: usize = 0;
-                    while (i < self.oam.len) : (i += 1) {
-                        self.oam[i] = self.readNoTick(source_base + @as(u16, @intCast(i)));
-                    }
+                    self.dma.start(val);
                 }
             },
 
@@ -319,7 +383,10 @@ pub const Bus = struct {
         }
 
         if (delay_tick_for_lcdc) self.tickAccess();
+    }
 
+    inline fn isHramAddress(addr: u16) bool {
+        return addr >= 0xFF80 and addr <= 0xFFFE;
     }
 
     /// Read 16-bit value (little endian)
@@ -335,3 +402,51 @@ pub const Bus = struct {
         self.write(addr +% 1, @truncate(val >> 8));
     }
 };
+
+test "OAM DMA copies one byte per M-cycle and locks the CPU bus" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    for (0..0xA0) |index| bus.wram[index] = @intCast(index);
+    bus.hram[0] = 0x12;
+    bus.write(0xFF46, 0xC0);
+
+    try std.testing.expect(bus.dma.active);
+    try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0xC000));
+    try std.testing.expectEqual(@as(u8, 0x12), bus.read(0xFF80));
+    bus.write(0xC000, 0xEE);
+    bus.write(0xFF80, 0x34);
+    try std.testing.expectEqual(@as(u8, 0), bus.wram[0]);
+    try std.testing.expectEqual(@as(u8, 0x34), bus.hram[0]);
+
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u8, 0), bus.oam[0]);
+    try std.testing.expect(bus.dma.active);
+
+    bus.tickDma(255);
+    bus.tickDma(255);
+    bus.tickDma(126);
+    try std.testing.expect(!bus.dma.active);
+    for (0..0xA0) |index| {
+        try std.testing.expectEqual(@as(u8, @intCast(index)), bus.oam[index]);
+    }
+}
+
+test "CPU VRAM access is blocked during pixel transfer" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    bus.vram[0] = 0x12;
+    bus.io.setPpuMode(3);
+    try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0x8000));
+    bus.write(0x8000, 0x34);
+
+    bus.io.setPpuMode(0);
+    try std.testing.expectEqual(@as(u8, 0x12), bus.read(0x8000));
+}

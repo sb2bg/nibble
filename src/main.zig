@@ -54,16 +54,14 @@ pub fn main() !void {
             \\  B       : Z or S
             \\  Start   : Enter, keypad Enter, or Space
             \\  Select  : Backspace or Tab
-            \\  Mouse   : Click on-screen joypad buttons
             \\
             \\Management:
             \\  P       : Pause/resume emulation
             \\  R       : Reset emulator
             \\  F5/F9   : Save/load state for active slot
             \\  [ / ]   : Previous/next save slot
-            \\  F1      : Toggle side panel
             \\  Esc     : Quit
-            \\  Mouse   : Click right-panel management buttons
+            \\  Title   : Shows run/pause state, active slot, and last action
             \\
             \\Example:
             \\  nibble roms/cpu_instrs/cpu_instrs.gb
@@ -83,15 +81,10 @@ pub fn main() !void {
         return;
     };
 
-    // Parse options
-    const max_steps: ?usize = res.args.steps;
-
-    const breakpoint: ?u16 = res.args.breakpoint;
-
     const options = EmulatorOptions{
         .debug = res.args.debug != 0,
-        .max_steps = max_steps orelse null,
-        .breakpoint = breakpoint,
+        .max_steps = res.args.steps,
+        .breakpoint = res.args.breakpoint,
         .headless = res.args.headless != 0,
     };
 

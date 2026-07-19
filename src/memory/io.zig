@@ -88,23 +88,19 @@ pub const IoRegisters = struct {
     // Raw register storage
     data: [0x80]u8,
 
-    // Timer internal state (DIV is upper 8 bits of 16-bit counter)
-    div_counter: u16,
-
     // Joypad state
     joypad_select: u8, // Which buttons are selected (bits 4-5 of JOYP)
     joypad_buttons: u8, // Button state: bits 0-3 = D-pad, bits 4-7 = buttons
     // Bit layout: Start, Select, B, A (bits 4-7), Down, Up, Left, Right (bits 0-3)
     // 0 = pressed, 1 = not pressed
 
-    // DMA state
-    dma_active: bool,
-    dma_source: u16,
-    dma_offset: u8,
-    dma_delay: u8,
-
     // Current OAM scan row during mode 2 (0-19)
     oam_scan_row: u8,
+
+    // The four enabled STAT sources are ORed onto one edge-triggered line.
+    // Tracking the previous level prevents duplicate interrupts when two
+    // sources overlap (commonly called STAT blocking).
+    stat_irq_line: bool,
 
     // Serial output (for test ROMs)
     allocator: std.mem.Allocator,
@@ -113,14 +109,10 @@ pub const IoRegisters = struct {
     pub fn init(allocator: std.mem.Allocator) IoRegisters {
         var io = IoRegisters{
             .data = [_]u8{0} ** 0x80,
-            .div_counter = 0,
             .joypad_select = 0x30, // Neither selected
             .joypad_buttons = 0xFF, // All buttons released
-            .dma_active = false,
-            .dma_source = 0,
-            .dma_offset = 0,
-            .dma_delay = 0,
             .oam_scan_row = 0,
+            .stat_irq_line = false,
             .allocator = allocator,
             .serial_output = std.ArrayList(u8){},
         };
@@ -128,6 +120,8 @@ pub const IoRegisters = struct {
         // Set initial values for some registers (post-boot ROM values)
         io.data[@intFromEnum(IoReg.JOYP)] = 0xCF;
         io.data[@intFromEnum(IoReg.IF)] = 0xE1;
+        io.data[@intFromEnum(IoReg.DIV)] = 0xAB;
+        io.data[@intFromEnum(IoReg.TAC)] = 0xF8;
         io.data[@intFromEnum(IoReg.LCDC)] = 0x91;
         io.data[@intFromEnum(IoReg.STAT)] = 0x81; // Mode 1 (VBlank) with bit 7 set
         io.data[@intFromEnum(IoReg.LY)] = 0x91; // Post-boot LY value (in VBlank)
@@ -152,10 +146,11 @@ pub const IoRegisters = struct {
         const reg: IoReg = @enumFromInt(addr);
         return switch (reg) {
             .JOYP => self.readJoypad(),
-            .DIV => @truncate(self.div_counter >> 8),
+            .DIV => self.data[addr],
             .LY => self.data[addr], // Read-only PPU scanline
             .STAT => self.data[addr] | 0x80, // Bit 7 always set
             .IF => self.data[addr] | 0xE0, // Upper 3 bits always set
+            .KEY1 => self.data[addr] | 0x7E,
             else => self.data[addr],
         };
     }
@@ -166,11 +161,14 @@ pub const IoRegisters = struct {
         switch (reg) {
             .JOYP => {
                 // Only bits 4-5 are writable (select lines)
+                const old_lines = self.readJoypad() & 0x0F;
                 self.joypad_select = val & 0x30;
+                self.requestJoypadEdge(old_lines);
             },
             .DIV => {
-                // Any write resets DIV to 0
-                self.div_counter = 0;
+                // The bus normally routes this through Timer so the hidden
+                // counter and falling-edge behavior are updated too.
+                self.data[addr] = 0;
             },
             .LY => {
                 // LY is read-only, writes are ignored
@@ -179,16 +177,23 @@ pub const IoRegisters = struct {
                 // Use setStat to handle writable bits properly
                 self.setStat(val);
             },
-            .DMA => {
-                // Start DMA transfer
-                self.data[addr] = val;
-                self.dma_active = true;
-                self.dma_source = @as(u16, val) << 8;
-                self.dma_offset = 0;
-                self.dma_delay = 2; // 2 cycle delay before DMA starts
-            },
             .TAC => {
+                // The bus normally routes this through Timer so a change in
+                // the selected counter bit can generate a falling edge.
                 self.data[addr] = val | 0xF8; // Upper 5 bits always set
+            },
+            .KEY1 => {
+                // Bit 0 arms a CGB speed switch; bit 7 is changed by STOP.
+                self.data[addr] = (self.data[addr] & 0x80) | (val & 0x01);
+            },
+            .LCDC => {
+                self.data[addr] = val;
+                self.updateStatInterrupt();
+            },
+            .LYC => {
+                self.data[addr] = val;
+                self.updateCoincidence();
+                self.updateStatInterrupt();
             },
             .SC => {
                 // Serial control - capture output when transfer is initiated
@@ -240,11 +245,18 @@ pub const IoRegisters = struct {
     /// Buttons: bit 0=Right, 1=Left, 2=Up, 3=Down, 4=A, 5=B, 6=Select, 7=Start
     /// Use 0 for pressed, 1 for released
     pub fn setJoypadState(self: *IoRegisters, state: u8) void {
+        const old_lines = self.readJoypad() & 0x0F;
         self.joypad_buttons = state;
+        self.requestJoypadEdge(old_lines);
     }
 
     pub fn getJoypadState(self: *const IoRegisters) u8 {
         return self.joypad_buttons;
+    }
+
+    fn requestJoypadEdge(self: *IoRegisters, old_lines: u8) void {
+        const new_lines = self.readJoypad() & 0x0F;
+        if ((old_lines & ~new_lines) != 0) self.requestInterrupt(Interrupt.JOYPAD);
     }
 
     /// Request an interrupt by setting a bit in IF
@@ -326,25 +338,74 @@ pub const IoRegisters = struct {
         const writable_bits = stat & 0x78;
         const readonly_bits = self.data[@intFromEnum(IoReg.STAT)] & 0x07;
         self.data[@intFromEnum(IoReg.STAT)] = writable_bits | readonly_bits | 0x80;
+        self.updateStatInterrupt();
     }
 
     pub fn setLy(self: *IoRegisters, ly: u8) void {
         self.data[@intFromEnum(IoReg.LY)] = ly;
+        self.updateCoincidence();
+        self.updateStatInterrupt();
+    }
 
-        // Check LY=LYC comparison
-        const lyc = self.getLyc();
-        const stat = self.getStat();
+    pub fn setPpuMode(self: *IoRegisters, mode: u2) void {
+        self.data[@intFromEnum(IoReg.STAT)] =
+            (self.data[@intFromEnum(IoReg.STAT)] & 0xFC) | mode | 0x80;
+        self.updateStatInterrupt();
+    }
 
-        // Update LYC flag (bit 2) in STAT
-        if (ly == lyc) {
-            self.data[@intFromEnum(IoReg.STAT)] |= 0x04; // Set LYC=LY flag
-
-            // Trigger STAT interrupt if LYC interrupt is enabled (bit 6)
-            if (stat & 0x40 != 0) {
-                self.requestInterrupt(Interrupt.LCD_STAT);
-            }
+    fn updateCoincidence(self: *IoRegisters) void {
+        const stat_index = @intFromEnum(IoReg.STAT);
+        if (self.data[@intFromEnum(IoReg.LY)] == self.data[@intFromEnum(IoReg.LYC)]) {
+            self.data[stat_index] |= 0x04;
         } else {
-            self.data[@intFromEnum(IoReg.STAT)] &= ~@as(u8, 0x04); // Clear LYC=LY flag
+            self.data[stat_index] &= ~@as(u8, 0x04);
         }
     }
+
+    fn updateStatInterrupt(self: *IoRegisters) void {
+        const lcd_enabled = (self.data[@intFromEnum(IoReg.LCDC)] & 0x80) != 0;
+        const stat = self.data[@intFromEnum(IoReg.STAT)];
+        const mode = stat & 0x03;
+        const line_high = lcd_enabled and (((stat & 0x40) != 0 and (stat & 0x04) != 0) or
+            ((stat & 0x20) != 0 and mode == 2) or
+            ((stat & 0x10) != 0 and mode == 1) or
+            ((stat & 0x08) != 0 and mode == 0));
+
+        if (line_high and !self.stat_irq_line) {
+            self.requestInterrupt(Interrupt.LCD_STAT);
+        }
+        self.stat_irq_line = line_high;
+    }
 };
+
+test "LYC writes update coincidence and request STAT only on a rising edge" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.setLy(12);
+    io.write(@intFromEnum(IoReg.STAT), 0x40);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+
+    io.write(@intFromEnum(IoReg.LYC), 12);
+    try std.testing.expect((io.getStat() & 0x04) != 0);
+    try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT) != 0);
+
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.setPpuMode(2);
+    try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT);
+}
+
+test "joypad interrupt follows selected input lines" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+    io.clearInterrupt(Interrupt.JOYPAD);
+
+    // Pressing A while neither group is selected does not pull a JOYP input
+    // line low.
+    io.setJoypadState(0xEF);
+    try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.JOYPAD);
+
+    // Selecting the already-held button creates the required high-to-low edge.
+    io.write(@intFromEnum(IoReg.JOYP), 0x10);
+    try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.JOYPAD) != 0);
+}
