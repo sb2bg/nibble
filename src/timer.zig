@@ -18,6 +18,11 @@ pub const Timer = struct {
     /// and the timer interrupt is requested.
     reload_delay: u3 = 0,
 
+    /// Bus writes become visible at the end of their M-cycle. Remember whether
+    /// the immediately preceding T-cycle performed a reload so same-cycle TIMA
+    /// and TMA writes can reproduce the DMG's otherwise surprising behavior.
+    reloaded_this_cycle: bool = false,
+
     pub fn init() Timer {
         return .{};
     }
@@ -43,12 +48,22 @@ pub const Timer = struct {
                 if (old_signal) self.incrementTima(io);
             },
             .TIMA => {
+                // A TIMA write on the reload cycle is ignored. This differs
+                // from an earlier write during the four-cycle overflow wait.
+                if (self.reloaded_this_cycle) return;
                 // A TIMA write during the overflow wait cancels the pending
                 // reload and interrupt.
                 self.reload_delay = 0;
                 io.data[addr] = value;
             },
-            .TMA => io.data[addr] = value,
+            .TMA => {
+                io.data[addr] = value;
+                // On the reload cycle, the new modulo value also appears in
+                // TIMA even though the automatic load already happened.
+                if (self.reloaded_this_cycle) {
+                    io.data[@intFromEnum(IoReg.TIMA)] = value;
+                }
+            },
             .TAC => {
                 const old_signal = self.timerSignal(io.data[addr]);
                 io.data[addr] = value | 0xF8;
@@ -64,6 +79,7 @@ pub const Timer = struct {
     pub fn tick(self: *Timer, cycles: u8, io: *IoRegisters) void {
         var remaining = cycles;
         while (remaining > 0) : (remaining -= 1) {
+            self.reloaded_this_cycle = false;
             self.tickReload(io);
 
             const tac = io.data[@intFromEnum(IoReg.TAC)];
@@ -83,6 +99,7 @@ pub const Timer = struct {
         if (self.reload_delay == 0) {
             io.data[@intFromEnum(IoReg.TIMA)] = io.data[@intFromEnum(IoReg.TMA)];
             io.requestInterrupt(Interrupt.TIMER);
+            self.reloaded_this_cycle = true;
         }
     }
 
@@ -170,4 +187,25 @@ test "writing TIMA cancels a pending reload" {
 
     try std.testing.expectEqual(@as(u8, 0x42), io.data[@intFromEnum(IoReg.TIMA)]);
     try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.TIMER);
+}
+
+test "writes on the reload cycle follow DMG TIMA and TMA rules" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+    var timer = Timer.init();
+    timer.system_counter = 0;
+    io.data[@intFromEnum(IoReg.DIV)] = 0;
+
+    timer.writeRegister(&io, @intFromEnum(IoReg.TAC), 0b101);
+    timer.writeRegister(&io, @intFromEnum(IoReg.TMA), 0xA7);
+    timer.writeRegister(&io, @intFromEnum(IoReg.TIMA), 0xFF);
+    timer.tick(20, &io);
+
+    try std.testing.expect(timer.reloaded_this_cycle);
+    timer.writeRegister(&io, @intFromEnum(IoReg.TIMA), 0x42);
+    try std.testing.expectEqual(@as(u8, 0xA7), io.data[@intFromEnum(IoReg.TIMA)]);
+
+    timer.writeRegister(&io, @intFromEnum(IoReg.TMA), 0x6B);
+    try std.testing.expectEqual(@as(u8, 0x6B), io.data[@intFromEnum(IoReg.TMA)]);
+    try std.testing.expectEqual(@as(u8, 0x6B), io.data[@intFromEnum(IoReg.TIMA)]);
 }
