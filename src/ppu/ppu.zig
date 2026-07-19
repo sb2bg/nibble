@@ -42,6 +42,8 @@ pub const Ppu = struct {
     window_line: u8,
     enabled: bool,
     frame_ready: bool,
+    lcd_startup: bool,
+    line_start_delay: u8,
 
     // Mode 3 pipeline state. These fields are intentionally persistent so a
     // save state taken mid-scanline resumes the same fetch/pop sequence.
@@ -69,6 +71,8 @@ pub const Ppu = struct {
             .window_line = 0,
             .enabled = false,
             .frame_ready = false,
+            .lcd_startup = false,
+            .line_start_delay = 0,
             .fetcher = .{},
             .pixel_x = 0,
             .startup_dots = 0,
@@ -93,6 +97,8 @@ pub const Ppu = struct {
         self.window_line = 0;
         self.enabled = false;
         self.frame_ready = true;
+        self.lcd_startup = false;
+        self.line_start_delay = 0;
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.startup_dots = 0;
@@ -112,6 +118,23 @@ pub const Ppu = struct {
     fn setMode(self: *Ppu, mode: PpuMode, bus: anytype) void {
         self.mode = mode;
         bus.io.setPpuMode(@intFromEnum(mode));
+        switch (mode) {
+            .HBlank, .VBlank => bus.io.setPpuMemoryBlocked(false, false),
+            .OamSearch => bus.io.setPpuMemoryBlocked(true, false),
+            .PixelTransfer => bus.io.setPpuMemoryBlocked(true, true),
+        }
+    }
+
+    pub fn syncIoState(self: *const Ppu, bus: anytype) void {
+        bus.io.setPpuMode(@intFromEnum(self.mode));
+        switch (self.mode) {
+            .HBlank, .VBlank => if (self.line_start_delay > 0)
+                bus.io.setPpuMemoryBlockedDetailed(true, false, false, false)
+            else
+                bus.io.setPpuMemoryBlocked(false, false),
+            .OamSearch => bus.io.setPpuMemoryBlocked(true, false),
+            .PixelTransfer => bus.io.setPpuMemoryBlocked(true, true),
+        }
     }
 
     pub fn tick(self: *Ppu, cycles: u32, bus: anytype) void {
@@ -129,33 +152,53 @@ pub const Ppu = struct {
                 // advancing at the first dot shifts every corruption pattern.
                 const row: u8 = @intCast(@min((self.mode_cycles - 1) / 4, 19));
                 bus.io.setOamScanRow(row);
-                // LCD enable enters this model four dots into mode 2. Capture
-                // the two entries belonging to that elapsed phase on the next
-                // dot, then resume the normal one-entry-per-two-dots cadence.
-                if (self.mode_cycles == 5 and self.oam_scan_index == 0) {
-                    self.scanOamEntry(bus, 0);
-                    self.scanOamEntry(bus, 1);
-                    self.oam_scan_index = 2;
-                } else if ((self.mode_cycles & 1) == 0 and self.oam_scan_index < 40) {
+                if ((self.mode_cycles & 1) == 0 and self.oam_scan_index < 40) {
                     self.scanOamEntry(bus, self.oam_scan_index);
                     self.oam_scan_index += 1;
+                }
+                // The DMG seizes VRAM reads near the end of OAM scan, before
+                // STAT changes to mode 3. Writes remain possible until mode 3.
+                if (self.mode_cycles == 76) {
+                    bus.io.setPpuMemoryBlockedDetailed(true, false, true, false);
                 }
                 if (self.mode_cycles == 80) self.beginPixelTransfer(bus);
             },
             .PixelTransfer => self.tickPixelTransfer(bus),
             .HBlank => {
-                const hblank_duration = 376 - @min(@as(u32, self.mode3_duration), 376);
+                // A DMG starts LCD line 0 in mode 0, skips its OAM scan, and
+                // enters mode 3 after 82 dots. This startup phase is distinct
+                // from the HBlank at the end of a rendered line.
+                if (self.lcd_startup) {
+                    if (self.mode_cycles >= 82) {
+                        self.lcd_startup = false;
+                        self.beginPixelTransfer(bus);
+                    }
+                    return;
+                }
+
+                // LY changes before STAT exposes mode 2. The four-dot mode-0
+                // phase at the head of each visible line is observable by CPU
+                // reads and is part of the fixed 456-dot line budget.
+                if (self.line_start_delay > 0) {
+                    self.line_start_delay -= 1;
+                    if (self.line_start_delay == 0) self.beginOamSearch(bus);
+                    return;
+                }
+
+                const hblank_duration = 372 - @min(@as(u32, self.mode3_duration), 372);
                 if (self.mode_cycles >= hblank_duration) {
                     self.mode_cycles = 0;
                     self.ly += 1;
-                    bus.io.setLy(self.ly);
 
                     if (self.ly == 144) {
+                        bus.io.setLy(self.ly);
                         self.setMode(.VBlank, bus);
                         bus.io.requestInterrupt(Interrupt.VBLANK);
                         self.frame_ready = true;
                     } else {
-                        self.beginOamSearch(bus);
+                        bus.io.beginVisibleLine(self.ly);
+                        bus.io.setPpuMemoryBlockedDetailed(true, false, false, false);
+                        self.line_start_delay = 4;
                     }
                 }
             },
@@ -180,6 +223,7 @@ pub const Ppu = struct {
         self.mode_cycles = 0;
         self.oam_scan_index = 0;
         self.line_sprite_count = 0;
+        bus.io.latchLyCoincidence();
         self.setMode(.OamSearch, bus);
     }
 
@@ -444,15 +488,19 @@ pub const Ppu = struct {
             self.mode_cycles = 0;
             self.mode3_duration = 172;
             self.window_line = 0;
+            self.lcd_startup = false;
+            self.line_start_delay = 0;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
         } else if (!was_enabled) {
             self.ly = 0;
-            self.mode = .OamSearch;
-            self.mode_cycles = 4;
+            self.mode = .HBlank;
+            self.mode_cycles = 0;
             self.mode3_duration = 172;
             self.window_line = 0;
+            self.lcd_startup = true;
+            self.line_start_delay = 0;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
@@ -467,6 +515,39 @@ test "disabling LCD leaves PPU in HBlank mode" {
 
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     try std.testing.expectEqual(@as(u8, 0), ppu.ly);
+}
+
+test "DMG LCD startup skips mode 2 and phases later scanlines" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const TestBus = struct {
+        io: IoRegisters,
+
+        fn readVram(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+
+        fn readOam(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    var ppu = Ppu.init();
+    ppu.setEnabled(true);
+
+    ppu.tick(81, &bus);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    ppu.tick(1, &bus);
+    try std.testing.expectEqual(PpuMode.PixelTransfer, ppu.mode);
+
+    ppu.tick(172, &bus);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    ppu.tick(200, &bus);
+    try std.testing.expectEqual(@as(u8, 1), ppu.ly);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    ppu.tick(4, &bus);
+    try std.testing.expectEqual(PpuMode.OamSearch, ppu.mode);
 }
 
 test "OAM scan row advances after each four-dot bus window" {
@@ -547,7 +628,7 @@ test "mode 3 emits background pixels through the dot FIFO" {
 
     var ppu = Ppu.init();
     ppu.setEnabled(true);
-    ppu.tick(76, &bus);
+    ppu.tick(82, &bus);
     try std.testing.expectEqual(PpuMode.PixelTransfer, ppu.mode);
 
     ppu.tick(172, &bus);
@@ -584,8 +665,10 @@ test "mode 2 selects sprites and the object FIFO mixes them at output" {
     bus.vram[16] = 0xFF;
 
     var ppu = Ppu.init();
-    ppu.setEnabled(true);
-    ppu.tick(76, &bus);
+    ppu.enabled = true;
+    ppu.ly = 0;
+    ppu.beginOamSearch(&bus);
+    ppu.tick(80, &bus);
     try std.testing.expectEqual(@as(u4, 1), ppu.line_sprite_count);
     try std.testing.expectEqual(@as(u6, 40), ppu.oam_scan_index);
     try std.testing.expectEqual(PpuMode.PixelTransfer, ppu.mode);

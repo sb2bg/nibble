@@ -97,6 +97,14 @@ pub const IoRegisters = struct {
     // Current OAM scan row during mode 2 (0-19)
     oam_scan_row: u8,
 
+    // The PPU's memory ownership changes a few dots before/after its public
+    // STAT mode bits at some boundaries, so access control cannot be derived
+    // solely from STAT.
+    ppu_oam_read_blocked: bool,
+    ppu_oam_write_blocked: bool,
+    ppu_vram_read_blocked: bool,
+    ppu_vram_write_blocked: bool,
+
     // The four enabled STAT sources are ORed onto one edge-triggered line.
     // Tracking the previous level prevents duplicate interrupts when two
     // sources overlap (commonly called STAT blocking).
@@ -112,6 +120,10 @@ pub const IoRegisters = struct {
             .joypad_select = 0x30, // Neither selected
             .joypad_buttons = 0xFF, // All buttons released
             .oam_scan_row = 0,
+            .ppu_oam_read_blocked = false,
+            .ppu_oam_write_blocked = false,
+            .ppu_vram_read_blocked = false,
+            .ppu_vram_write_blocked = false,
             .stat_irq_line = false,
             .allocator = allocator,
             .serial_output = .empty,
@@ -318,6 +330,23 @@ pub const IoRegisters = struct {
         self.oam_scan_row = row;
     }
 
+    pub fn setPpuMemoryBlocked(self: *IoRegisters, oam: bool, vram: bool) void {
+        self.setPpuMemoryBlockedDetailed(oam, oam, vram, vram);
+    }
+
+    pub fn setPpuMemoryBlockedDetailed(
+        self: *IoRegisters,
+        oam_read: bool,
+        oam_write: bool,
+        vram_read: bool,
+        vram_write: bool,
+    ) void {
+        self.ppu_oam_read_blocked = oam_read;
+        self.ppu_oam_write_blocked = oam_write;
+        self.ppu_vram_read_blocked = vram_read;
+        self.ppu_vram_write_blocked = vram_write;
+    }
+
     pub fn getScy(self: *const IoRegisters) u8 {
         return self.data[@intFromEnum(IoReg.SCY)];
     }
@@ -368,6 +397,20 @@ pub const IoRegisters = struct {
         if ((self.data[@intFromEnum(IoReg.LCDC)] & 0x80) != 0) {
             self.updateCoincidence();
         }
+        self.updateStatInterrupt();
+    }
+
+    /// At the start of a visible DMG scanline, LY changes one dot before the
+    /// comparator latches the new line. During that short phase coincidence
+    /// reads false even if the new LY equals LYC.
+    pub fn beginVisibleLine(self: *IoRegisters, ly: u8) void {
+        self.data[@intFromEnum(IoReg.LY)] = ly;
+        self.data[@intFromEnum(IoReg.STAT)] &= ~@as(u8, 0x04);
+        self.updateStatInterrupt();
+    }
+
+    pub fn latchLyCoincidence(self: *IoRegisters) void {
+        self.updateCoincidence();
         self.updateStatInterrupt();
     }
 
@@ -489,6 +532,18 @@ test "retained LY coincidence does not retrigger when LCD is enabled" {
         @as(u8, 0),
         io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT,
     );
+}
+
+test "visible line start delays the new LY comparison" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.write(@intFromEnum(IoReg.LYC), 1);
+    io.beginVisibleLine(1);
+    try std.testing.expectEqual(@as(u8, 0), io.getStat() & 0x04);
+
+    io.latchLyCoincidence();
+    try std.testing.expect((io.getStat() & 0x04) != 0);
 }
 
 test "joypad interrupt follows selected input lines" {

@@ -48,6 +48,10 @@ const IoState = struct {
     joypad_select: u8,
     joypad_buttons: u8,
     oam_scan_row: u8,
+    ppu_oam_read_blocked: bool,
+    ppu_oam_write_blocked: bool,
+    ppu_vram_read_blocked: bool,
+    ppu_vram_write_blocked: bool,
     stat_irq_line: bool,
 };
 
@@ -268,12 +272,13 @@ pub const Emulator = struct {
         // Update PPU enabled state from LCDC.
         const lcdc = self.bus.io.getLcdc();
         self.ppu.setEnabled((lcdc & 0x80) != 0);
-        self.bus.io.setPpuMode(@intFromEnum(self.ppu.mode));
+        self.ppu.syncIoState(&self.bus);
 
         if ((lcdc & 0x80) == 0) {
             // LY reads as 0 while LCD is disabled.
             self.bus.io.setLy(0);
             self.bus.io.setPpuMode(0);
+            self.bus.io.setPpuMemoryBlocked(false, false);
         }
 
         self.ppu.tick(cycles, &self.bus);
@@ -448,6 +453,10 @@ pub const Emulator = struct {
                 .joypad_select = self.bus.io.joypad_select,
                 .joypad_buttons = self.bus.io.joypad_buttons,
                 .oam_scan_row = self.bus.io.oam_scan_row,
+                .ppu_oam_read_blocked = self.bus.io.ppu_oam_read_blocked,
+                .ppu_oam_write_blocked = self.bus.io.ppu_oam_write_blocked,
+                .ppu_vram_read_blocked = self.bus.io.ppu_vram_read_blocked,
+                .ppu_vram_write_blocked = self.bus.io.ppu_vram_write_blocked,
                 .stat_irq_line = self.bus.io.stat_irq_line,
             },
             .ie_register = self.bus.ie_register,
@@ -476,6 +485,10 @@ pub const Emulator = struct {
         self.bus.io.joypad_select = state.io.joypad_select;
         self.bus.io.joypad_buttons = state.io.joypad_buttons;
         self.bus.io.oam_scan_row = state.io.oam_scan_row;
+        self.bus.io.ppu_oam_read_blocked = state.io.ppu_oam_read_blocked;
+        self.bus.io.ppu_oam_write_blocked = state.io.ppu_oam_write_blocked;
+        self.bus.io.ppu_vram_read_blocked = state.io.ppu_vram_read_blocked;
+        self.bus.io.ppu_vram_write_blocked = state.io.ppu_vram_write_blocked;
         self.bus.io.stat_irq_line = state.io.stat_irq_line;
         self.bus.io.serial_output.clearRetainingCapacity();
 

@@ -176,13 +176,20 @@ pub const Bus = struct {
         return self.io.getPpuMode() == 2;
     }
 
-    inline fn isPpuOamBlocked(self: *const Bus) bool {
-        const mode = self.io.getPpuMode();
-        return mode == 2 or mode == 3;
+    inline fn isPpuOamReadBlocked(self: *const Bus) bool {
+        return self.io.ppu_oam_read_blocked;
     }
 
-    inline fn isPpuVramBlocked(self: *const Bus) bool {
-        return self.io.getPpuMode() == 3;
+    inline fn isPpuOamWriteBlocked(self: *const Bus) bool {
+        return self.io.ppu_oam_write_blocked;
+    }
+
+    inline fn isPpuVramReadBlocked(self: *const Bus) bool {
+        return self.io.ppu_vram_read_blocked;
+    }
+
+    inline fn isPpuVramWriteBlocked(self: *const Bus) bool {
+        return self.io.ppu_vram_write_blocked;
     }
 
     inline fn isOamAddress(addr: u16) bool {
@@ -309,11 +316,11 @@ pub const Bus = struct {
             return 0xFF;
         }
 
-        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramBlocked()) {
+        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramReadBlocked()) {
             return 0xFF;
         }
 
-        if (isOamAddress(addr) and self.isPpuOamBlocked()) {
+        if (isOamAddress(addr) and self.isPpuOamReadBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
                 @constCast(self).applyOamReadCorruption(self.io.getOamScanRow());
@@ -368,11 +375,11 @@ pub const Bus = struct {
             return;
         }
 
-        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramBlocked()) {
+        if (count_cycle and addr >= 0x8000 and addr <= 0x9FFF and self.isPpuVramWriteBlocked()) {
             return;
         }
 
-        if (isOamMemoryAddress(addr) and self.isPpuOamBlocked()) {
+        if (isOamMemoryAddress(addr) and self.isPpuOamWriteBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
                 self.applyOamWriteCorruption(self.io.getOamScanRow());
