@@ -432,13 +432,11 @@ pub const Bus = struct {
         return addr >= 0xFF80 and addr <= 0xFFFE;
     }
 
-    inline fn isWramAddress(addr: u16) bool {
-        return addr >= 0xC000 and addr <= 0xFDFF;
-    }
-
     fn dmaBlocksCpuAccess(source: u16, addr: u16) bool {
         if (isHramAddress(addr)) return false;
-        if (source >= 0x8000 and source <= 0x9FFF and isWramAddress(addr)) return false;
+        if (source >= 0x8000 and source <= 0x9FFF) {
+            return (addr >= 0x8000 and addr <= 0x9FFF) or isOamAddress(addr);
+        }
         return true;
     }
 
@@ -548,7 +546,7 @@ test "DMG DMA source pages E0 through FF mirror C0 through DF" {
     }
 }
 
-test "VRAM-source DMA leaves WRAM bus accessible but still blocks OAM" {
+test "VRAM-source DMA leaves cartridge and WRAM buses accessible" {
     var bus = Bus.init(
         std.testing.allocator,
         try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
@@ -561,6 +559,7 @@ test "VRAM-source DMA leaves WRAM bus accessible but still blocks OAM" {
     bus.write(0xFF46, 0x80);
     bus.tickDma(8);
 
+    try std.testing.expectEqual(@as(u8, 0), bus.read(0x0000));
     try std.testing.expectEqual(@as(u8, 0x42), bus.read(0xC000));
     try std.testing.expectEqual(@as(u8, 0x42), bus.read(0xE000));
     try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0x8000));
