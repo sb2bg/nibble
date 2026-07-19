@@ -19,13 +19,14 @@ Implemented core pieces:
 - Emulator management hotkeys (pause, reset, save/load state, slot selection)
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
+- Cycle-driven DMG serial transfers with completion interrupts
 
 Known gaps:
 - No audio/APU emulation
 - OAM corruption behavior is only partially accurate (`blargg/oam_bug` still has failing subtests)
 - `STOP` instruction behavior is only partially modeled
 - Object fetch cancellation and fetcher arbitration are still approximate
-- Serial transfers complete immediately rather than at link-cable timing
+- External-clock serial transfers have no link-partner implementation
 
 ## Requirements
 

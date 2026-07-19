@@ -119,6 +119,7 @@ pub const IoRegisters = struct {
 
         // Set initial values for some registers (post-boot ROM values)
         io.data[@intFromEnum(IoReg.JOYP)] = 0xCF;
+        io.data[@intFromEnum(IoReg.SC)] = 0x7E;
         io.data[@intFromEnum(IoReg.IF)] = 0xE1;
         io.data[@intFromEnum(IoReg.DIV)] = 0xAB;
         io.data[@intFromEnum(IoReg.TAC)] = 0xF8;
@@ -196,17 +197,8 @@ pub const IoRegisters = struct {
                 self.updateStatInterrupt();
             },
             .SC => {
-                // Serial control - capture output when transfer is initiated
-                if (val == 0x81) {
-                    // Transfer requested (internal clock)
-                    const byte = self.data[@intFromEnum(IoReg.SB)];
-                    self.serial_output.append(self.allocator, byte) catch {};
-
-                    // Print to stderr immediately for test ROM output
-                    if (byte >= 0x20 and byte < 0x7F or byte == '\n' or byte == '\r') {
-                        std.debug.print("{c}", .{byte});
-                    }
-                }
+                // The bus routes this through Serial so transfer timing and
+                // completion interrupts have one owner.
                 self.data[addr] = val | 0x7E; // Bits 1-6 always set (DMG)
             },
             .NR52 => {
@@ -277,6 +269,13 @@ pub const IoRegisters = struct {
     /// Get serial output buffer (for test ROMs)
     pub fn getSerialOutput(self: *const IoRegisters) []const u8 {
         return self.serial_output.items;
+    }
+
+    pub fn captureSerialOutput(self: *IoRegisters, byte: u8) void {
+        self.serial_output.append(self.allocator, byte) catch {};
+        if (byte >= 0x20 and byte < 0x7F or byte == '\n' or byte == '\r') {
+            std.debug.print("{c}", .{byte});
+        }
     }
 
     // PPU register helpers

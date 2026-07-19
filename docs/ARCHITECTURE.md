@@ -14,6 +14,8 @@ same amount.
   which device answers a memory access.
 - `Timer` owns the hidden 16-bit system counter and delayed TIMA reload. The bus
   routes DIV/TIMA/TMA/TAC writes to it so there is one source of timer state.
+- `Serial` owns link-transfer progress. The bus routes SC writes to it and
+  advances the 8,192 Hz DMG internal clock alongside the other peripherals.
 - `IoRegisters` owns memory-mapped register values and register-local behavior.
   It also owns the combined edge-triggered STAT line and selected joypad lines.
 - `Mbc` owns mapper registers, address translation, MBC2 internal nibble RAM,
@@ -53,6 +55,8 @@ Implemented timing details include:
   affect only pixels that have not reached the LCD yet;
 - a window line counter that advances only on lines where the window is drawn;
 - cycle-driven MBC3 RTC state, making emulation and save states deterministic.
+- eight-bit internal-clock serial transfers over 4,096 dots, including visible
+  SB shifts, SC completion, disconnected-high input, and the serial interrupt.
 
 ## Deliberate approximations
 
@@ -62,9 +66,9 @@ the hardware's cancelable fetch micro-steps. Rapid mid-fetch LCDC changes and
 some background/object fetcher arbitration therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
-OAM corruption is modeled but does not pass every `blargg/oam_bug` case. Serial
-transfers complete immediately, STOP is a low-power approximation, and the APU
-is not implemented.
+OAM corruption is modeled but does not pass every `blargg/oam_bug` case.
+External serial transfers wait for a clock indefinitely because link partners
+are not implemented. STOP is a low-power approximation, and the APU is absent.
 
 These references define the current fidelity targets:
 
@@ -72,6 +76,7 @@ These references define the current fidelity targets:
 - [Pan Docs: OAM DMA](https://gbdev.io/pandocs/OAM_DMA_Transfer.html)
 - [Pan Docs: rendering](https://gbdev.io/pandocs/Rendering.html)
 - [Pan Docs: interrupt sources and STAT blocking](https://gbdev.io/pandocs/Interrupt_Sources.html)
+- [Pan Docs: serial data transfer](https://gbdev.io/pandocs/Serial_Data_Transfer_%28Link_Cable%29.html)
 - [Pan Docs: MBC1](https://gbdev.io/pandocs/MBC1.html), [MBC2](https://gbdev.io/pandocs/MBC2.html), and [MBC3](https://gbdev.io/pandocs/MBC3.html)
 - [Mooneye Test Suite](https://github.com/Gekkio/mooneye-test-suite), whose
   hardware-verified acceptance tests should be the next automated ROM suite.

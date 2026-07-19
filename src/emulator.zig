@@ -6,6 +6,7 @@ const Bus = bus_mod.Bus;
 const Dma = bus_mod.Dma;
 const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 const Timer = @import("timer.zig").Timer;
+const Serial = @import("serial.zig").Serial;
 const Mbc = @import("memory/mbc.zig").Mbc;
 const ppu_mod = @import("ppu/ppu.zig");
 const Ppu = ppu_mod.Ppu;
@@ -52,6 +53,7 @@ const BusState = struct {
     io: IoState,
     ie_register: u8,
     timer: Timer,
+    serial: Serial,
     dma: Dma,
     mbc: Mbc.Snapshot,
     cart_ram_len: usize,
@@ -251,6 +253,7 @@ pub const Emulator = struct {
         }
 
         self.bus.tickTimer(cycles);
+        self.bus.tickSerial(cycles);
         self.bus.tickDma(cycles);
         self.bus.cartridge.mbc.tick(cycles);
     }
@@ -417,6 +420,7 @@ pub const Emulator = struct {
             },
             .ie_register = self.bus.ie_register,
             .timer = self.bus.timer,
+            .serial = self.bus.serial,
             .dma = self.bus.dma,
             .mbc = self.bus.cartridge.mbc.snapshot(),
             .cart_ram_len = 0,
@@ -445,6 +449,7 @@ pub const Emulator = struct {
 
         self.bus.ie_register = state.ie_register;
         self.bus.timer = state.timer;
+        self.bus.serial = state.serial;
         self.bus.dma = state.dma;
 
         self.bus.cartridge.mbc.restore(state.mbc);

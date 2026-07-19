@@ -3,6 +3,7 @@ const IoRegisters = @import("io.zig").IoRegisters;
 const IoReg = @import("io.zig").IoReg;
 const Cartridge = @import("../cartridge/cartridge.zig").Cartridge;
 const Timer = @import("../timer.zig").Timer;
+const Serial = @import("../serial.zig").Serial;
 
 /// OAM DMA progresses one byte per M-cycle. On DMG, the CPU can only reach
 /// HRAM while a transfer is active; DMA's own source reads bypass that lockout.
@@ -39,6 +40,7 @@ pub const Bus = struct {
     io: IoRegisters,
     ie_register: u8, // Interrupt Enable (0xFFFF)
     timer: Timer,
+    serial: Serial,
     dma: Dma,
 
     // Cartridge (owns ROM + RAM + MBC)
@@ -56,6 +58,7 @@ pub const Bus = struct {
             .io = IoRegisters.init(allocator),
             .ie_register = 0,
             .timer = Timer.init(),
+            .serial = .{},
             .dma = .{},
             .cartridge = cartridge,
             .cycle_hook = null,
@@ -76,6 +79,7 @@ pub const Bus = struct {
         self.io.reset();
         self.ie_register = 0;
         self.timer.reset(&self.io);
+        self.serial.reset();
         self.dma = .{};
         self.cartridge.mbc.reset();
     }
@@ -111,6 +115,10 @@ pub const Bus = struct {
                 self.dma.cycles_until_copy = 4;
             }
         }
+    }
+
+    pub fn tickSerial(self: *Bus, cycles: u8) void {
+        self.serial.tick(cycles, &self.io);
     }
 
     pub fn triggerOamBugWriteIdu(self: *Bus, addr: u16) void {
@@ -364,7 +372,9 @@ pub const Bus = struct {
             // I/O Registers
             0xFF00...0xFF7F => {
                 const io_addr: u8 = @truncate(addr - 0xFF00);
-                if (Timer.isRegister(io_addr)) {
+                if (io_addr == @intFromEnum(IoReg.SC)) {
+                    self.serial.writeControl(&self.io, val);
+                } else if (Timer.isRegister(io_addr)) {
                     self.timer.writeRegister(&self.io, io_addr, val);
                 } else {
                     self.io.write(io_addr, val);
