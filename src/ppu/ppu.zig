@@ -320,6 +320,21 @@ pub const Ppu = struct {
             }
         }
 
+        const window_start: u16 = if (bus.io.getWx() <= 7) 0 else bus.io.getWx() - 7;
+        const window_stalls_next_dot = !self.window_started and
+            self.isWindowVisible(bus) and self.pixel_x == window_start;
+        const next_dot_finishes_line = self.pixel_x == SCREEN_WIDTH - 1 and
+            self.startup_dots == 0 and
+            self.sprite_fetch_dots == 0 and
+            self.next_sprite >= self.line_sprite_count and
+            self.fetcher.fifo.len > 0 and
+            !window_stalls_next_dot;
+        // STAT is read through the CPU bus latch. When the final mode-3 dot
+        // falls on phase 3, that latch exposes the upcoming mode 0 one dot
+        // before the renderer and video-memory locks actually transition.
+        bus.io.setStatReadEarlyHblank(next_dot_finishes_line and
+            ((self.mode_cycles + 1) & 0x03) == 3);
+
         if (self.pixel_x >= SCREEN_WIDTH and self.mode_cycles >= self.mode3_duration) {
             // A FIFO underflow may extend mode 3; keep the scanline total fixed
             // by shortening HBlank by the same amount.
@@ -454,7 +469,12 @@ pub const Ppu = struct {
             var penalty: u16 = 0;
 
             if (sprite.oam_x == 0) {
-                penalty = 11;
+                // X=0 has the full 11-dot startup cost, but overlapping
+                // objects reuse the same background-fetch alignment and add
+                // only the flat six-dot object fetch.
+                const tile: i16 = -1;
+                penalty = if (last_tile == null or last_tile.? != tile) 11 else 6;
+                last_tile = tile;
             } else {
                 if (sprite.oam_x > 167) continue;
 

@@ -110,6 +110,7 @@ pub const IoRegisters = struct {
     // sources overlap (commonly called STAT blocking).
     stat_irq_line: bool,
     stat_mode0_suppressed: bool,
+    stat_read_early_hblank: bool,
 
     // Serial output (for test ROMs)
     allocator: std.mem.Allocator,
@@ -127,6 +128,7 @@ pub const IoRegisters = struct {
             .ppu_vram_write_blocked = false,
             .stat_irq_line = false,
             .stat_mode0_suppressed = false,
+            .stat_read_early_hblank = false,
             .allocator = allocator,
             .serial_output = .empty,
         };
@@ -164,7 +166,10 @@ pub const IoRegisters = struct {
             .JOYP => self.readJoypad(),
             .DIV => self.data[addr],
             .LY => self.data[addr], // Read-only PPU scanline
-            .STAT => self.data[addr] | 0x80, // Bit 7 always set
+            .STAT => blk: {
+                const stat = self.data[addr] | 0x80;
+                break :blk if (self.stat_read_early_hblank) stat & 0xFC else stat;
+            },
             .IF => self.data[addr] | 0xE0, // Upper 3 bits always set
             .NR10 => self.data[addr] | 0x80,
             .NR30 => self.data[addr] | 0x7F,
@@ -417,6 +422,7 @@ pub const IoRegisters = struct {
     }
 
     pub fn setPpuMode(self: *IoRegisters, mode: u2) void {
+        self.stat_read_early_hblank = false;
         if (mode != 0) self.stat_mode0_suppressed = false;
         self.data[@intFromEnum(IoReg.STAT)] =
             (self.data[@intFromEnum(IoReg.STAT)] & 0xFC) | mode | 0x80;
@@ -430,6 +436,10 @@ pub const IoRegisters = struct {
     pub fn releaseMode0Stat(self: *IoRegisters) void {
         self.stat_mode0_suppressed = false;
         self.updateStatInterrupt();
+    }
+
+    pub fn setStatReadEarlyHblank(self: *IoRegisters, active: bool) void {
+        self.stat_read_early_hblank = active;
     }
 
     /// On DMG visible lines, the mode-2 STAT source rises one dot before the
@@ -597,6 +607,19 @@ test "mode 0 STAT source can wait for the CPU sampling phase" {
 
     io.releaseMode0Stat();
     try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT) != 0);
+}
+
+test "STAT read latch can expose an imminent HBlank" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.setPpuMode(3);
+    io.setStatReadEarlyHblank(true);
+    try std.testing.expectEqual(@as(u2, 3), io.getPpuMode());
+    try std.testing.expectEqual(@as(u8, 0), io.read(@intFromEnum(IoReg.STAT)) & 0x03);
+
+    io.setPpuMode(0);
+    try std.testing.expect(!io.stat_read_early_hblank);
 }
 
 test "joypad interrupt follows selected input lines" {
