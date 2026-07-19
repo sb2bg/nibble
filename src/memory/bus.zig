@@ -12,14 +12,15 @@ pub const Dma = struct {
     source: u16 = 0,
     next_byte: u8 = 0,
     cycles_until_copy: u3 = 0,
+    pending_source: u16 = 0,
+    start_delay: u4 = 0,
 
     fn start(self: *Dma, source_high: u8) void {
-        self.* = .{
-            .active = true,
-            .source = @as(u16, source_high) << 8,
-            .next_byte = 0,
-            .cycles_until_copy = 4,
-        };
+        // The write occupies M0, M1 leaves the previous DMA state intact, and
+        // the new transfer becomes active for accesses in M2. A restart must
+        // therefore retain the old active transfer during this delay.
+        self.pending_source = @as(u16, source_high) << 8;
+        self.start_delay = 8;
     }
 };
 
@@ -101,19 +102,38 @@ pub const Bus = struct {
 
     pub fn tickDma(self: *Bus, cycles: u8) void {
         var remaining = cycles;
-        while (remaining > 0 and self.dma.active) : (remaining -= 1) {
+        while (remaining > 0) : (remaining -= 1) {
+            if (self.dma.start_delay != 0) {
+                self.dma.start_delay -= 1;
+                if (self.dma.start_delay == 0) {
+                    self.dma.active = true;
+                    self.dma.source = self.dma.pending_source;
+                    self.dma.next_byte = 0;
+                    // The bus becomes unavailable in M2; byte zero completes
+                    // one M-cycle later, preserving the full 160-M-cycle
+                    // transfer lifetime after activation.
+                    self.dma.cycles_until_copy = 4;
+                    continue;
+                }
+            }
+
+            if (!self.dma.active) continue;
             self.dma.cycles_until_copy -= 1;
             if (self.dma.cycles_until_copy != 0) continue;
 
-            const index = self.dma.next_byte;
-            self.oam[index] = self.readNoTick(self.dma.source + @as(u16, index));
+            self.copyDmaByte();
+        }
+    }
 
-            if (index == 0x9F) {
-                self.dma.active = false;
-            } else {
-                self.dma.next_byte += 1;
-                self.dma.cycles_until_copy = 4;
-            }
+    fn copyDmaByte(self: *Bus) void {
+        const index = self.dma.next_byte;
+        self.oam[index] = self.readNoTick(self.dma.source + @as(u16, index));
+
+        if (index == 0x9F) {
+            self.dma.active = false;
+        } else {
+            self.dma.next_byte += 1;
+            self.dma.cycles_until_copy = 4;
         }
     }
 
@@ -331,7 +351,9 @@ pub const Bus = struct {
         const delay_tick_for_lcdc = count_cycle and addr == 0xFF40;
         if (count_cycle and !delay_tick_for_lcdc) self.tickAccess();
 
-        if (count_cycle and self.dma.active and !isHramAddress(addr)) {
+        // FF46 remains writable so an HRAM routine can restart an active DMA.
+        const is_dma_restart = addr == 0xFF46;
+        if (count_cycle and self.dma.active and !isHramAddress(addr) and !is_dma_restart) {
             return;
         }
 
@@ -413,7 +435,7 @@ pub const Bus = struct {
     }
 };
 
-test "OAM DMA copies one byte per M-cycle and locks the CPU bus" {
+test "OAM DMA starts after one accessible M-cycle and then locks the CPU bus" {
     var bus = Bus.init(
         std.testing.allocator,
         try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
@@ -421,20 +443,28 @@ test "OAM DMA copies one byte per M-cycle and locks the CPU bus" {
     defer bus.deinit();
 
     for (0..0xA0) |index| bus.wram[index] = @intCast(index);
+    bus.oam[0] = 0xEE;
     bus.hram[0] = 0x12;
     bus.write(0xFF46, 0xC0);
 
+    try std.testing.expect(!bus.dma.active);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(0xC000));
+    bus.tickDma(4);
+    try std.testing.expect(!bus.dma.active);
+    try std.testing.expectEqual(@as(u8, 0), bus.read(0xC000));
+
+    bus.tickDma(4);
     try std.testing.expect(bus.dma.active);
+    try std.testing.expectEqual(@as(u8, 0xEE), bus.oam[0]);
+
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u8, 0), bus.oam[0]);
     try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0xC000));
     try std.testing.expectEqual(@as(u8, 0x12), bus.read(0xFF80));
     bus.write(0xC000, 0xEE);
     bus.write(0xFF80, 0x34);
     try std.testing.expectEqual(@as(u8, 0), bus.wram[0]);
     try std.testing.expectEqual(@as(u8, 0x34), bus.hram[0]);
-
-    bus.tickDma(4);
-    try std.testing.expectEqual(@as(u8, 0), bus.oam[0]);
-    try std.testing.expect(bus.dma.active);
 
     bus.tickDma(255);
     bus.tickDma(255);
@@ -443,6 +473,34 @@ test "OAM DMA copies one byte per M-cycle and locks the CPU bus" {
     for (0..0xA0) |index| {
         try std.testing.expectEqual(@as(u8, @intCast(index)), bus.oam[index]);
     }
+}
+
+test "OAM DMA restart remains writable and delays the new source" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    bus.wram[0] = 0x11;
+    bus.wram[1] = 0x12;
+    bus.wram[0x1000] = 0xA1;
+    bus.write(0xFF46, 0xC0);
+    bus.tickDma(8);
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u8, 0x11), bus.oam[0]);
+
+    bus.write(0xFF46, 0xD0);
+    try std.testing.expectEqual(@as(u8, 8), bus.dma.start_delay);
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u8, 0x12), bus.oam[1]);
+    try std.testing.expectEqual(@as(u16, 0xC000), bus.dma.source);
+
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u16, 0xD000), bus.dma.source);
+    try std.testing.expectEqual(@as(u8, 0x11), bus.oam[0]);
+    bus.tickDma(4);
+    try std.testing.expectEqual(@as(u8, 0xA1), bus.oam[0]);
 }
 
 test "CPU VRAM access is blocked during pixel transfer" {
