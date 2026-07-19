@@ -1038,8 +1038,15 @@ pub const Cpu = struct {
             return int_cycles;
         }
 
-        // If halted, just wait
+        // HALT still clocks the machine. An interrupt that rises during this
+        // idle M-cycle can use it as the first wait state of dispatch; checking
+        // only before the idle cycle delays every HALT wakeup by four dots.
         if (self.halted) {
+            bus.tickInternal(4);
+            if (self.handleInterrupts(bus, true)) |int_cycles| {
+                self.cycles += int_cycles;
+                return int_cycles;
+            }
             self.cycles += 4;
             return 4;
         }
@@ -1147,6 +1154,38 @@ test "DI inhibits an interrupt raised during its opcode fetch" {
     try std.testing.expect(!cpu.ime);
     try std.testing.expectEqual(@as(u16, 0xC001), cpu.pc);
     try std.testing.expect((bus.io.data[@intFromEnum(IoReg.IF)] & Interrupt.TIMER) != 0);
+}
+
+test "HALT services an interrupt raised during its idle cycle" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0xC000;
+    cpu.halted = true;
+    cpu.ime = true;
+    bus.ie_register = Interrupt.TIMER;
+
+    const Hook = struct {
+        bus: *Bus,
+        fired: bool = false,
+
+        fn tick(ptr: *anyopaque, _: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.fired) return;
+            self.fired = true;
+            self.bus.io.requestInterrupt(Interrupt.TIMER);
+        }
+    };
+    var hook = Hook{ .bus = &bus };
+    bus.setCycleHook(.{ .context = @ptrCast(&hook), .tickFn = Hook.tick });
+
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expect(!cpu.halted);
+    try std.testing.expectEqual(@as(u16, 0x0050), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xC000), bus.read16(cpu.sp));
 }
 
 test "consecutive EI instructions do not postpone IME" {
