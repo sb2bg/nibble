@@ -292,8 +292,29 @@ pub const Cpu = struct {
     // Interrupts
     // =========================================================================
 
-    /// Handle pending interrupts. Returns cycles used if interrupt was handled.
-    fn handleInterrupts(self: *Cpu, bus: *Bus) ?u8 {
+    const InterruptTarget = struct {
+        bit: u8,
+        vector: u16,
+    };
+
+    fn highestPriorityInterrupt(pending: u8) ?InterruptTarget {
+        const targets = [_]InterruptTarget{
+            .{ .bit = Interrupt.VBLANK, .vector = 0x0040 },
+            .{ .bit = Interrupt.LCD_STAT, .vector = 0x0048 },
+            .{ .bit = Interrupt.TIMER, .vector = 0x0050 },
+            .{ .bit = Interrupt.SERIAL, .vector = 0x0058 },
+            .{ .bit = Interrupt.JOYPAD, .vector = 0x0060 },
+        };
+        for (targets) |target| {
+            if ((pending & target.bit) != 0) return target;
+        }
+        return null;
+    }
+
+    /// Handle pending interrupts. `opcode_wait_complete` is true when the
+    /// opcode-fetch M-cycle detected the request and already supplied the first
+    /// of dispatch's two wait states.
+    fn handleInterrupts(self: *Cpu, bus: *Bus, opcode_wait_complete: bool) ?u8 {
         const ie = bus.ie_register;
         const if_reg = bus.io.data[@intFromEnum(IoReg.IF)];
         const pending = ie & if_reg & 0x1F;
@@ -305,26 +326,31 @@ pub const Cpu = struct {
 
         if (!self.ime) return null;
 
-        // Handle highest priority interrupt
-        const interrupt_vectors = [_]struct { bit: u8, addr: u16 }{
-            .{ .bit = Interrupt.VBLANK, .addr = 0x0040 },
-            .{ .bit = Interrupt.LCD_STAT, .addr = 0x0048 },
-            .{ .bit = Interrupt.TIMER, .addr = 0x0050 },
-            .{ .bit = Interrupt.SERIAL, .addr = 0x0058 },
-            .{ .bit = Interrupt.JOYPAD, .addr = 0x0060 },
-        };
+        self.ime = false;
+        bus.tickInternal(if (opcode_wait_complete) 4 else 8);
 
-        for (interrupt_vectors) |iv| {
-            if (pending & iv.bit != 0) {
-                self.ime = false;
-                bus.io.clearInterrupt(iv.bit);
-                self.push(self.pc, bus);
-                self.pc = iv.addr;
-                return 20; // Interrupt dispatch takes 20 cycles
-            }
+        // Dispatch performs normal PC stack writes. A high-byte write to IE can
+        // still cancel or reprioritize the interrupt; after that M-cycle the
+        // selected source is latched and the low-byte write is too late.
+        const return_pc = self.pc;
+        const sp_before_hi = self.sp;
+        self.sp -%= 1;
+        bus.write(self.sp, @truncate(return_pc >> 8));
+        bus.triggerOamBugWriteIdu(sp_before_hi);
+        const target = highestPriorityInterrupt(pendingInterrupts(bus));
+
+        self.sp -%= 1;
+        bus.write(self.sp, @truncate(return_pc));
+
+        if (target) |selected| {
+            bus.io.clearInterrupt(selected.bit);
+            self.pc = selected.vector;
+        } else {
+            // The CPU still finishes dispatch after an IE write cancels every
+            // pending source, but with no vector selected its destination is 0.
+            self.pc = 0;
         }
-
-        return null;
+        return 20;
     }
 
     fn pendingInterrupts(bus: *const Bus) u8 {
@@ -996,7 +1022,7 @@ pub const Cpu = struct {
     /// Returns the number of cycles used
     pub fn step(self: *Cpu, bus: *Bus) u8 {
         // Check for interrupts
-        if (self.handleInterrupts(bus)) |int_cycles| {
+        if (self.handleInterrupts(bus, false)) |int_cycles| {
             self.cycles += int_cycles;
             return int_cycles;
         }
@@ -1014,7 +1040,7 @@ pub const Cpu = struct {
             // The opcode-fetch M-cycle is part of interrupt dispatch, so the
             // interrupted instruction remains the return address.
             self.pc = opcode_pc;
-            const int_cycles = self.handleInterrupts(bus).?;
+            const int_cycles = self.handleInterrupts(bus, true).?;
             self.cycles += int_cycles;
             return int_cycles;
         }
@@ -1094,4 +1120,62 @@ test "consecutive EI instructions do not postpone IME" {
     try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
     try std.testing.expectEqual(@as(u16, 0x0058), cpu.pc);
     try std.testing.expectEqual(@as(u16, 0xC002), bus.read16(cpu.sp));
+}
+
+test "interrupt high-byte push can cancel dispatch through IE" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0x0200;
+    cpu.sp = 0x0000;
+    cpu.ime = true;
+    bus.ie_register = Interrupt.TIMER;
+    bus.io.requestInterrupt(Interrupt.TIMER);
+
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0), cpu.pc);
+    try std.testing.expectEqual(@as(u16, 0xFFFE), cpu.sp);
+    try std.testing.expectEqual(@as(u8, Interrupt.LCD_STAT), bus.ie_register);
+    try std.testing.expect((bus.io.data[@intFromEnum(IoReg.IF)] & Interrupt.TIMER) != 0);
+}
+
+test "interrupt high-byte push can reprioritize dispatch through IE" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0x0200;
+    cpu.sp = 0x0000;
+    cpu.ime = true;
+    bus.ie_register = Interrupt.VBLANK | Interrupt.LCD_STAT;
+    bus.io.requestInterrupt(Interrupt.VBLANK | Interrupt.LCD_STAT);
+
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0x0048), cpu.pc);
+    try std.testing.expectEqual(@as(u8, Interrupt.LCD_STAT), bus.ie_register);
+    try std.testing.expectEqual(@as(u8, Interrupt.VBLANK), bus.io.data[@intFromEnum(IoReg.IF)] & 0x1F);
+}
+
+test "interrupt low-byte push cannot cancel a latched source" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0x3535;
+    cpu.sp = 0x0001;
+    cpu.ime = true;
+    bus.ie_register = Interrupt.SERIAL;
+    bus.io.requestInterrupt(Interrupt.SERIAL);
+
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0x0058), cpu.pc);
+    try std.testing.expectEqual(@as(u8, 0x35), bus.ie_register);
+    try std.testing.expectEqual(@as(u8, 0), bus.io.data[@intFromEnum(IoReg.IF)] & Interrupt.SERIAL);
 }
