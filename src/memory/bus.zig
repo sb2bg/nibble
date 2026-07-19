@@ -301,9 +301,11 @@ pub const Bus = struct {
         if (count_cycle) self.tickAccess();
 
         // FF46 is wired to its own latch and remains readable while DMA owns
-        // the main bus. Software sees the most recently written source byte.
+        // the main bus. A VRAM-source transfer occupies the video bus, so the
+        // CPU can still reach WRAM and its echo; OAM remains unavailable as the
+        // DMA destination.
         const is_dma_register = addr == 0xFF46;
-        if (count_cycle and self.dma.active and !isHramAddress(addr) and !is_dma_register) {
+        if (count_cycle and self.dma.active and dmaBlocksCpuAccess(self.dma.source, addr) and !is_dma_register) {
             return 0xFF;
         }
 
@@ -362,7 +364,7 @@ pub const Bus = struct {
 
         // FF46 remains writable so an HRAM routine can restart an active DMA.
         const is_dma_restart = addr == 0xFF46;
-        if (count_cycle and self.dma.active and !isHramAddress(addr) and !is_dma_restart) {
+        if (count_cycle and self.dma.active and dmaBlocksCpuAccess(self.dma.source, addr) and !is_dma_restart) {
             return;
         }
 
@@ -428,6 +430,16 @@ pub const Bus = struct {
 
     inline fn isHramAddress(addr: u16) bool {
         return addr >= 0xFF80 and addr <= 0xFFFE;
+    }
+
+    inline fn isWramAddress(addr: u16) bool {
+        return addr >= 0xC000 and addr <= 0xFDFF;
+    }
+
+    fn dmaBlocksCpuAccess(source: u16, addr: u16) bool {
+        if (isHramAddress(addr)) return false;
+        if (source >= 0x8000 and source <= 0x9FFF and isWramAddress(addr)) return false;
+        return true;
     }
 
     /// Read 16-bit value (little endian)
@@ -534,6 +546,25 @@ test "DMG DMA source pages E0 through FF mirror C0 through DF" {
         try std.testing.expectEqual(case.expected, bus.oam[0]);
         bus.dma = .{};
     }
+}
+
+test "VRAM-source DMA leaves WRAM bus accessible but still blocks OAM" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    bus.wram[0] = 0x42;
+    bus.vram[0] = 0x99;
+    bus.oam[0] = 0x24;
+    bus.write(0xFF46, 0x80);
+    bus.tickDma(8);
+
+    try std.testing.expectEqual(@as(u8, 0x42), bus.read(0xC000));
+    try std.testing.expectEqual(@as(u8, 0x42), bus.read(0xE000));
+    try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0x8000));
+    try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0xFE00));
 }
 
 test "CPU VRAM access is blocked during pixel transfer" {
