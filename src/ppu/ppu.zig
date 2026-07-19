@@ -181,6 +181,7 @@ pub const Ppu = struct {
                 // reads and is part of the fixed 456-dot line budget.
                 if (self.line_start_delay > 0) {
                     self.line_start_delay -= 1;
+                    if (self.line_start_delay == 1) bus.io.preassertMode2Stat();
                     if (self.line_start_delay == 0) self.beginOamSearch(bus);
                     return;
                 }

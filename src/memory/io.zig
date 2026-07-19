@@ -420,6 +420,16 @@ pub const IoRegisters = struct {
         self.updateStatInterrupt();
     }
 
+    /// On DMG visible lines, the mode-2 STAT source rises one dot before the
+    /// public STAT mode bits change from 0 to 2.
+    pub fn preassertMode2Stat(self: *IoRegisters) void {
+        const mode2_enabled = (self.data[@intFromEnum(IoReg.STAT)] & 0x20) != 0;
+        if (mode2_enabled and !self.stat_irq_line) {
+            self.requestInterrupt(Interrupt.LCD_STAT);
+        }
+        self.stat_irq_line = self.stat_irq_line or mode2_enabled;
+    }
+
     fn updateCoincidence(self: *IoRegisters) void {
         const stat_index = @intFromEnum(IoReg.STAT);
         if (self.data[@intFromEnum(IoReg.LY)] == self.data[@intFromEnum(IoReg.LYC)]) {
@@ -544,6 +554,22 @@ test "visible line start delays the new LY comparison" {
 
     io.latchLyCoincidence();
     try std.testing.expect((io.getStat() & 0x04) != 0);
+}
+
+test "mode 2 STAT source rises before the public mode changes" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+
+    io.write(@intFromEnum(IoReg.STAT), 0x20);
+    io.setPpuMode(0);
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.preassertMode2Stat();
+    try std.testing.expectEqual(@as(u2, 0), io.getPpuMode());
+    try std.testing.expect((io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT) != 0);
+
+    io.clearInterrupt(Interrupt.LCD_STAT);
+    io.setPpuMode(2);
+    try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.IF)] & Interrupt.LCD_STAT);
 }
 
 test "joypad interrupt follows selected input lines" {
