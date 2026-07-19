@@ -81,5 +81,5 @@ pub fn build(b: *std.Build) void {
     // SDL dependency for graphics and input
     // Use system compiler to avoid Zig's C frontend issues with ARM NEON headers
     exe.root_module.link_libc = true;
-    exe.linkSystemLibrary2("sdl2", .{ .use_pkg_config = .force });
+    exe.root_module.linkSystemLibrary("sdl2", .{ .use_pkg_config = .force });
 }

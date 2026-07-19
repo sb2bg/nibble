@@ -10,12 +10,12 @@ Implemented core pieces:
 - CPU instruction decode/execute loop with interrupt handling
 - Memory bus with cartridge support and MBC banking (`ROM`, `MBC1`, `MBC2`, `MBC3`, `MBC5`)
 - Timer (`DIV/TIMA/TMA/TAC`)
+- Timed DMG OAM DMA and CPU bus lockout
 - PPU timing + background/window/sprite rendering
+- Deterministic MBC3 real-time clock registers and latching
 - SDL2 window output (with automatic headless fallback if SDL init fails)
 - Joypad input mapping + joypad interrupt signaling
-- Around-screen control deck UI:
-  - Left side joypad visualization (D-pad, A/B, Start/Select)
-  - Right side management panel with status, slot info, and action buttons
+- Minimal SDL frontend focused on the 160x144 game screen
 - Emulator management hotkeys (pause, reset, save/load state, slot selection)
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
@@ -23,8 +23,9 @@ Implemented core pieces:
 Known gaps:
 - No audio/APU emulation
 - OAM corruption behavior is only partially accurate (`blargg/oam_bug` still has failing subtests)
-- `STOP` instruction behavior is stubbed
-- MBC3 RTC latch/register behavior is not implemented
+- `STOP` instruction behavior is only partially modeled
+- PPU rendering is scanline-based rather than a dot-level pixel FIFO
+- Serial transfers complete immediately rather than at link-cable timing
 
 ## Requirements
 
@@ -44,7 +45,7 @@ This produces the executable at `zig-out/bin/nibble`.
 
 ```bash
 # graphical mode (SDL window)
-zig build run -- roms/Dr.\ Mario\ \(World\).gb
+zig build run -- "roms/Dr. Mario (World).gb"
 
 # headless mode (useful for test ROMs / CI)
 zig build run -- --headless roms/blargg/cpu_instrs/cpu_instrs.gb
@@ -69,7 +70,6 @@ Controls (default):
 - B: `Z` or `S`
 - Start: `Enter`, keypad `Enter`, or `Space`
 - Select: `Backspace` or `Tab`
-- Mouse: click the on-screen joypad/buttons in the side panels
 
 Management hotkeys (SDL mode):
 - `P`: pause/resume emulation
@@ -77,9 +77,8 @@ Management hotkeys (SDL mode):
 - `F5`: save state to active slot
 - `F9`: load state from active slot
 - `[ / ]`: previous/next save slot
-- `F1`: toggle side panel visibility
 - `Esc`: quit
-- Mouse: click `PAUSE`, `RESET`, `SAVE`, `LOAD`, and slot buttons in the right panel
+- Window title: shows run/pause state, active slot, and the last status message
 
 Save state notes:
 - Save states are currently in-memory only (session-local, not persisted to disk).
@@ -103,6 +102,7 @@ Test and reference ROMs are available under `roms/` (for example `roms/blargg/` 
 - `src/timer.zig`: timer/divider logic
 - `src/sdl.zig`: minimal SDL2 bindings
 - `roms/`: local ROMs used for development/testing
+- `docs/ARCHITECTURE.md`: component ownership, timing model, and accuracy limits
 
 ## Notes
 
