@@ -110,6 +110,23 @@ pub const Rtc = struct {
 
 /// Memory-bank controller state and address translation.
 pub const Mbc = struct {
+    /// Stable, read-only mapper state intended for debuggers, test harnesses,
+    /// and language bindings. Consumers should not have to understand the raw
+    /// mapper registers merely to answer which banks are currently visible.
+    pub const Inspection = struct {
+        mbc_type: MbcType,
+        has_rtc: bool,
+        ram_enabled: bool,
+        banking_mode: u1,
+        rom_bank_register: u16,
+        ram_bank_register: u8,
+        lower_rom_bank: u16,
+        upper_rom_bank: u16,
+        effective_ram_bank: usize,
+        rtc_register_selected: ?u8,
+        rtc: Rtc,
+    };
+
     pub const Snapshot = struct {
         rom_bank: u16,
         ram_bank: u8,
@@ -183,6 +200,24 @@ pub const Mbc = struct {
         self.banking_mode = state.banking_mode;
         self.mbc2_ram = state.mbc2_ram;
         self.rtc = state.rtc;
+    }
+
+    pub fn inspect(self: *const Mbc) Inspection {
+        const rtc_selected = self.mbc_type == .mbc3 and
+            self.ram_bank >= 0x08 and self.ram_bank <= 0x0C;
+        return .{
+            .mbc_type = self.mbc_type,
+            .has_rtc = self.has_rtc,
+            .ram_enabled = self.ram_enabled,
+            .banking_mode = self.banking_mode,
+            .rom_bank_register = self.rom_bank,
+            .ram_bank_register = self.ram_bank,
+            .lower_rom_bank = self.effectiveRomBank(0x0000),
+            .upper_rom_bank = self.effectiveRomBank(0x4000),
+            .effective_ram_bank = self.effectiveRamBank(),
+            .rtc_register_selected = if (rtc_selected) self.ram_bank else null,
+            .rtc = self.rtc,
+        };
     }
 
     pub fn tick(self: *Mbc, cycles: u8) void {

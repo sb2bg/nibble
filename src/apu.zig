@@ -174,6 +174,18 @@ pub const Apu = struct {
     /// Advance generators and the DIV-APU frame sequencer from the system
     /// counter value that was visible before this batch.
     pub fn tick(self: *Apu, cycles: u8, divider_start: u16) void {
+        self.tickWithSampleCapture(cycles, divider_start, true);
+    }
+
+    /// Advance all CPU-visible APU state while optionally omitting host PCM
+    /// production. Headless simulations still emulate channel timing and wave
+    /// RAM arbitration; they merely avoid mixing samples nobody will consume.
+    pub fn tickWithSampleCapture(
+        self: *Apu,
+        cycles: u8,
+        divider_start: u16,
+        capture_samples: bool,
+    ) void {
         var divider = divider_start;
         var remaining = cycles;
         while (remaining > 0) : (remaining -= 1) {
@@ -193,7 +205,7 @@ pub const Apu = struct {
             self.sample_accumulator += SAMPLE_RATE;
             if (self.sample_accumulator >= MASTER_CLOCK) {
                 self.sample_accumulator -= MASTER_CLOCK;
-                self.emitSample();
+                if (capture_samples) self.emitSample();
             }
         }
     }

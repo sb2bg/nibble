@@ -138,6 +138,13 @@ pub const RomHeader = struct {
 
 /// Cartridge - contains ROM data, RAM, header, and MBC
 pub const Cartridge = struct {
+    pub const Inspection = struct {
+        header: RomHeader,
+        rom_bytes: usize,
+        ram_bytes: usize,
+        mapper: Mbc.Inspection,
+    };
+
     allocator: Allocator,
     rom_data: []u8,
     ram_data: ?[]u8,
@@ -152,12 +159,31 @@ pub const Cartridge = struct {
         if (stat.size < 0x150) return error.RomTooSmall;
         const rom_size = std.math.cast(usize, stat.size) orelse return error.RomTooLarge;
         const rom_data = try allocator.alloc(u8, rom_size);
-        errdefer allocator.free(rom_data);
 
-        const bytes_read = try file.readPositionalAll(io, rom_data, 0);
+        const bytes_read = file.readPositionalAll(io, rom_data, 0) catch |err| {
+            allocator.free(rom_data);
+            return err;
+        };
         if (bytes_read != rom_size) {
+            allocator.free(rom_data);
             return error.IncompleteRead;
         }
+
+        return fromOwnedRom(allocator, rom_data);
+    }
+
+    /// Construct a cartridge without involving the filesystem. The ROM is
+    /// copied so callers may release their input immediately; immutable ROM
+    /// sharing between many machines can be layered on top of this boundary.
+    pub fn fromRom(allocator: Allocator, data: []const u8) !Cartridge {
+        const rom_data = try allocator.dupe(u8, data);
+        return fromOwnedRom(allocator, rom_data);
+    }
+
+    /// Take ownership of an allocated ROM buffer and validate its header.
+    fn fromOwnedRom(allocator: Allocator, rom_data: []u8) !Cartridge {
+        errdefer allocator.free(rom_data);
+        if (rom_data.len < 0x150) return error.RomTooSmall;
 
         const header = RomHeader.parse(rom_data);
         const mbc_type = header.getMbcType() orelse return error.UnsupportedCartridgeType;
@@ -200,5 +226,14 @@ pub const Cartridge = struct {
         if (self.ram_data) |r| {
             std.debug.print("External RAM: {d} bytes allocated\n", .{r.len});
         }
+    }
+
+    pub fn inspect(self: *const Cartridge) Inspection {
+        return .{
+            .header = self.header,
+            .rom_bytes = self.rom_data.len,
+            .ram_bytes = if (self.ram_data) |ram| ram.len else 0,
+            .mapper = self.mbc.inspect(),
+        };
     }
 };

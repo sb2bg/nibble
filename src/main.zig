@@ -78,12 +78,12 @@ pub fn main(init: std.process.Init) !void {
 
     if (parsed.mooneye_test) {
         switch (emu.mooneyeResult() orelse {
-            std.debug.print("Mooneye: NO RESULT after {d} steps\n", .{emu.steps});
+            std.debug.print("Mooneye: NO RESULT after {d} steps\n", .{emu.machine.steps});
             std.process.exit(2);
         }) {
-            .passed => std.debug.print("Mooneye: PASS ({d} steps)\n", .{emu.steps}),
+            .passed => std.debug.print("Mooneye: PASS ({d} steps)\n", .{emu.machine.steps}),
             .failed => {
-                std.debug.print("Mooneye: FAIL ({d} steps)\n", .{emu.steps});
+                std.debug.print("Mooneye: FAIL ({d} steps)\n", .{emu.machine.steps});
                 std.process.exit(1);
             },
         }
@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
 
     if (!options.debug) {
         std.debug.print("\n=== Execution Complete ===\n", .{});
-        std.debug.print("Total steps: {d}\n", .{emu.steps});
-        std.debug.print("Total cycles: {d}\n", .{emu.cpu.cycles});
+        std.debug.print("Total steps: {d}\n", .{emu.machine.steps});
+        std.debug.print("Total cycles: {d}\n", .{emu.machine.cpu.cycles});
     }
 }

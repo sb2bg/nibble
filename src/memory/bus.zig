@@ -104,8 +104,8 @@ pub const Bus = struct {
         self.timer.tick(cycles, &self.io);
     }
 
-    pub fn tickApu(self: *Bus, cycles: u8, divider_start: u16) void {
-        self.apu.tick(cycles, divider_start);
+    pub fn tickApu(self: *Bus, cycles: u8, divider_start: u16, capture_samples: bool) void {
+        self.apu.tickWithSampleCapture(cycles, divider_start, capture_samples);
     }
 
     pub fn tickDma(self: *Bus, cycles: u8) void {
@@ -327,6 +327,13 @@ pub const Bus = struct {
         return self.readInternal(addr, true);
     }
 
+    /// Read without consuming a CPU bus cycle. Intended for debugger and
+    /// automation observations; unlike a CPU access it cannot trigger OAM
+    /// corruption or be rejected by CPU-only DMA/PPU arbitration.
+    pub fn peek(self: *const Bus, addr: u16) u8 {
+        return self.readInternal(addr, false);
+    }
+
     fn readNoTick(self: *const Bus, addr: u16) u8 {
         return self.readInternal(addr, false);
     }
@@ -347,7 +354,7 @@ pub const Bus = struct {
             return 0xFF;
         }
 
-        if (isOamAddress(addr) and self.isPpuOamReadBlocked()) {
+        if (count_cycle and isOamAddress(addr) and self.isPpuOamReadBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
                 const row = self.io.getOamScanRow();
