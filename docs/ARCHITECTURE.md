@@ -76,8 +76,9 @@ emulation loop itself remains single-threaded and deterministic; concurrency is
 only introduced across machines. Backends that cannot guarantee concurrency
 fall back to completing unsubmitted chunks on the caller. Instruction, bounded
 single-frame, and observation-selective multi-frame operations share this
-partitioning, and caller-provided result slices preserve machine order without
-allocating in the batch API.
+partitioning. `stepFramesWithButtonsParallel` combines machine-ordered actions
+with a shared frame-repeat interval, while caller-provided result slices
+preserve machine order without allocating in the batch API.
 
 `Debugger` is an optional execution adapter rather than a dependency of the
 machine core. It checks PC breakpoints before stepping, compares caller-selected
