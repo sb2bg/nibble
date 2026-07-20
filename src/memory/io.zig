@@ -111,6 +111,7 @@ pub const IoRegisters = struct {
     stat_irq_line: bool,
     stat_mode0_suppressed: bool,
     stat_read_early_hblank: bool,
+    late_interrupts: u8,
 
     // Serial output (for test ROMs)
     allocator: std.mem.Allocator,
@@ -129,6 +130,7 @@ pub const IoRegisters = struct {
             .stat_irq_line = false,
             .stat_mode0_suppressed = false,
             .stat_read_early_hblank = false,
+            .late_interrupts = 0,
             .allocator = allocator,
             .serial_output = .empty,
         };
@@ -234,6 +236,10 @@ pub const IoRegisters = struct {
                 // completion interrupts have one owner.
                 self.data[addr] = val | 0x7E; // Bits 1-6 always set (DMG)
             },
+            .IF => {
+                self.data[addr] = val | 0xE0;
+                self.late_interrupts &= val;
+            },
             .NR52 => {
                 // Only bit 7 is writable (sound on/off)
                 if (val & 0x80 == 0) {
@@ -298,14 +304,27 @@ pub const IoRegisters = struct {
         self.data[@intFromEnum(IoReg.IF)] |= interrupt;
     }
 
+    /// Raise IF after the CPU's sampling point in the active M-cycle. IF is
+    /// readable immediately; dispatch eligibility is latched at the next CPU
+    /// boundary.
+    pub fn requestInterruptLate(self: *IoRegisters, interrupt: u8) void {
+        self.requestInterrupt(interrupt);
+        self.late_interrupts |= interrupt;
+    }
+
+    pub fn latchLateInterrupts(self: *IoRegisters) void {
+        self.late_interrupts = 0;
+    }
+
     /// Clear an interrupt flag
     pub fn clearInterrupt(self: *IoRegisters, interrupt: u8) void {
         self.data[@intFromEnum(IoReg.IF)] &= ~interrupt;
+        self.late_interrupts &= ~interrupt;
     }
 
     /// Get pending interrupts (IF & IE)
     pub fn getPendingInterrupts(self: *const IoRegisters, ie: u8) u8 {
-        return self.data[@intFromEnum(IoReg.IF)] & ie & 0x1F;
+        return self.data[@intFromEnum(IoReg.IF)] & ~self.late_interrupts & ie & 0x1F;
     }
 
     /// Get serial output buffer (for test ROMs)
@@ -448,6 +467,14 @@ pub const IoRegisters = struct {
         const mode2_enabled = (self.data[@intFromEnum(IoReg.STAT)] & 0x20) != 0;
         if (mode2_enabled and !self.stat_irq_line) {
             self.requestInterrupt(Interrupt.LCD_STAT);
+        }
+        self.stat_irq_line = self.stat_irq_line or mode2_enabled;
+    }
+
+    pub fn preassertMode2StatLate(self: *IoRegisters) void {
+        const mode2_enabled = (self.data[@intFromEnum(IoReg.STAT)] & 0x20) != 0;
+        if (mode2_enabled and !self.stat_irq_line) {
+            self.requestInterruptLate(Interrupt.LCD_STAT);
         }
         self.stat_irq_line = self.stat_irq_line or mode2_enabled;
     }
@@ -620,6 +647,19 @@ test "STAT read latch can expose an imminent HBlank" {
 
     io.setPpuMode(0);
     try std.testing.expect(!io.stat_read_early_hblank);
+}
+
+test "late interrupt exposes IF before CPU dispatch eligibility" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+    io.clearInterrupt(Interrupt.VBLANK);
+
+    io.requestInterruptLate(Interrupt.VBLANK);
+    try std.testing.expect((io.read(@intFromEnum(IoReg.IF)) & Interrupt.VBLANK) != 0);
+    try std.testing.expectEqual(@as(u8, 0), io.getPendingInterrupts(Interrupt.VBLANK));
+
+    io.latchLateInterrupts();
+    try std.testing.expectEqual(Interrupt.VBLANK, io.getPendingInterrupts(Interrupt.VBLANK));
 }
 
 test "joypad interrupt follows selected input lines" {

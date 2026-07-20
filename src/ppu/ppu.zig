@@ -45,6 +45,7 @@ pub const Ppu = struct {
     lcd_startup: bool,
     line_start_delay: u8,
     mode0_stat_delay: u8,
+    vblank_startup: bool,
 
     // Mode 3 pipeline state. These fields are intentionally persistent so a
     // save state taken mid-scanline resumes the same fetch/pop sequence.
@@ -75,6 +76,7 @@ pub const Ppu = struct {
             .lcd_startup = false,
             .line_start_delay = 0,
             .mode0_stat_delay = 0,
+            .vblank_startup = false,
             .fetcher = .{},
             .pixel_x = 0,
             .startup_dots = 0,
@@ -102,6 +104,7 @@ pub const Ppu = struct {
         self.lcd_startup = false;
         self.line_start_delay = 0;
         self.mode0_stat_delay = 0;
+        self.vblank_startup = false;
         self.fetcher.reset(false);
         self.pixel_x = 0;
         self.startup_dots = 0;
@@ -168,6 +171,19 @@ pub const Ppu = struct {
             },
             .PixelTransfer => self.tickPixelTransfer(bus),
             .HBlank => {
+                // Line 144 begins with a short mode-0 tail: IF rises after the
+                // CPU sampling point at the line boundary, LY follows after
+                // two dots, and the public mode becomes 1 after four dots.
+                if (self.vblank_startup) {
+                    if (self.mode_cycles == 2) bus.io.setLy(self.ly);
+                    if (self.mode_cycles >= 4) {
+                        self.vblank_startup = false;
+                        self.setMode(.VBlank, bus);
+                        self.frame_ready = true;
+                    }
+                    return;
+                }
+
                 if (self.mode0_stat_delay > 0) {
                     self.mode0_stat_delay -= 1;
                     if (self.mode0_stat_delay == 0) bus.io.releaseMode0Stat();
@@ -189,7 +205,11 @@ pub const Ppu = struct {
                 // reads and is part of the fixed 456-dot line budget.
                 if (self.line_start_delay > 0) {
                     self.line_start_delay -= 1;
-                    if (self.line_start_delay == 1) bus.io.preassertMode2Stat();
+                    // Unlike lines 1-143, line 0 does not expose the mode-2
+                    // interrupt source one dot before its public mode bits.
+                    if (self.line_start_delay == 1 and self.ly != 0) {
+                        bus.io.preassertMode2Stat();
+                    }
                     if (self.line_start_delay == 0) self.beginOamSearch(bus);
                     return;
                 }
@@ -200,14 +220,9 @@ pub const Ppu = struct {
                     self.ly += 1;
 
                     if (self.ly == 144) {
-                        bus.io.setLy(self.ly);
-                        // DMG exposes the mode-2 STAT source as VBlank begins,
-                        // even though the public mode changes to 1. This pulse
-                        // is simultaneous with the VBlank request.
-                        bus.io.preassertMode2Stat();
-                        self.setMode(.VBlank, bus);
-                        bus.io.requestInterrupt(Interrupt.VBLANK);
-                        self.frame_ready = true;
+                        bus.io.preassertMode2StatLate();
+                        bus.io.requestInterruptLate(Interrupt.VBLANK);
+                        self.vblank_startup = true;
                     } else {
                         bus.io.beginVisibleLine(self.ly);
                         bus.io.setPpuMemoryBlockedDetailed(true, false, false, false);
@@ -219,13 +234,20 @@ pub const Ppu = struct {
                 if (self.mode_cycles == 456) {
                     self.mode_cycles = 0;
                     self.ly += 1;
-                    bus.io.setLy(self.ly);
 
                     if (self.ly > 153) {
                         self.ly = 0;
                         self.window_line = 0;
+                        // A normal frame's line 0 has the same four-dot
+                        // HBlank-to-OAM bus phase as later visible lines. It
+                        // was previously skipped here, shortening every frame
+                        // by one M-cycle while leaving per-line tests green.
+                        self.setMode(.HBlank, bus);
+                        bus.io.beginVisibleLine(self.ly);
+                        bus.io.setPpuMemoryBlockedDetailed(true, false, false, false);
+                        self.line_start_delay = 4;
+                    } else {
                         bus.io.setLy(self.ly);
-                        self.beginOamSearch(bus);
                     }
                 }
             },
@@ -531,6 +553,7 @@ pub const Ppu = struct {
             self.lcd_startup = false;
             self.line_start_delay = 0;
             self.mode0_stat_delay = 0;
+            self.vblank_startup = false;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
@@ -543,6 +566,7 @@ pub const Ppu = struct {
             self.lcd_startup = true;
             self.line_start_delay = 0;
             self.mode0_stat_delay = 0;
+            self.vblank_startup = false;
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
@@ -589,6 +613,73 @@ test "DMG LCD startup skips mode 2 and phases later scanlines" {
     try std.testing.expectEqual(@as(u8, 1), ppu.ly);
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     ppu.tick(4, &bus);
+    try std.testing.expectEqual(PpuMode.OamSearch, ppu.mode);
+}
+
+test "DMG phases line 144 interrupt and public mode edges" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const IoReg = @import("../memory/io.zig").IoReg;
+    const TestBus = struct {
+        io: IoRegisters,
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    var ppu = Ppu.init();
+    ppu.enabled = true;
+    ppu.mode = .HBlank;
+    ppu.ly = 143;
+    ppu.mode3_duration = 172;
+    ppu.mode_cycles = 199;
+    bus.io.setLy(143);
+    bus.io.setPpuMode(@intFromEnum(PpuMode.HBlank));
+    bus.io.data[@intFromEnum(IoReg.STAT)] |= 0x20;
+
+    ppu.tick(1, &bus); // End line 143 and raise the late-dot requests.
+    try std.testing.expect(ppu.vblank_startup);
+    try std.testing.expectEqual(@as(u8, 143), bus.io.getLy());
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    try std.testing.expectEqual(
+        Interrupt.VBLANK | Interrupt.LCD_STAT,
+        bus.io.late_interrupts & (Interrupt.VBLANK | Interrupt.LCD_STAT),
+    );
+
+    ppu.tick(2, &bus);
+    try std.testing.expectEqual(@as(u8, 144), bus.io.getLy());
+
+    ppu.tick(2, &bus);
+    try std.testing.expectEqual(PpuMode.VBlank, ppu.mode);
+    try std.testing.expect(!ppu.vblank_startup);
+    try std.testing.expectEqual(
+        Interrupt.VBLANK | Interrupt.LCD_STAT,
+        bus.io.data[@intFromEnum(IoReg.IF)] & (Interrupt.VBLANK | Interrupt.LCD_STAT),
+    );
+}
+
+test "normal frame line zero keeps its four-dot mode 0 head" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const TestBus = struct {
+        io: IoRegisters,
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    var ppu = Ppu.init();
+    ppu.enabled = true;
+    ppu.mode = .VBlank;
+    ppu.ly = 153;
+    ppu.mode_cycles = 455;
+    bus.io.setLy(153);
+    bus.io.setPpuMode(@intFromEnum(PpuMode.VBlank));
+
+    ppu.tick(1, &bus);
+    try std.testing.expectEqual(@as(u8, 0), ppu.ly);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    try std.testing.expectEqual(@as(u8, 4), ppu.line_start_delay);
+
+    ppu.tick(3, &bus);
+    try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
+    ppu.tick(1, &bus);
     try std.testing.expectEqual(PpuMode.OamSearch, ppu.mode);
 }
 

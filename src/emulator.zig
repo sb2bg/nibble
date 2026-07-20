@@ -55,6 +55,7 @@ const IoState = struct {
     stat_irq_line: bool,
     stat_mode0_suppressed: bool,
     stat_read_early_hblank: bool,
+    late_interrupts: u8,
 };
 
 const BusState = struct {
@@ -463,6 +464,7 @@ pub const Emulator = struct {
                 .stat_irq_line = self.bus.io.stat_irq_line,
                 .stat_mode0_suppressed = self.bus.io.stat_mode0_suppressed,
                 .stat_read_early_hblank = self.bus.io.stat_read_early_hblank,
+                .late_interrupts = self.bus.io.late_interrupts,
             },
             .ie_register = self.bus.ie_register,
             .timer = self.bus.timer,
@@ -497,6 +499,7 @@ pub const Emulator = struct {
         self.bus.io.stat_irq_line = state.io.stat_irq_line;
         self.bus.io.stat_mode0_suppressed = state.io.stat_mode0_suppressed;
         self.bus.io.stat_read_early_hblank = state.io.stat_read_early_hblank;
+        self.bus.io.late_interrupts = state.io.late_interrupts;
         self.bus.io.serial_output.clearRetainingCapacity();
 
         self.bus.ie_register = state.ie_register;

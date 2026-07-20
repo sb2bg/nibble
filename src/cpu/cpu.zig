@@ -323,14 +323,15 @@ pub const Cpu = struct {
     /// opcode-fetch M-cycle detected the request and already supplied the first
     /// of dispatch's two wait states.
     fn handleInterrupts(self: *Cpu, bus: *Bus, opcode_wait_complete: bool) ?u8 {
-        const ie = bus.ie_register;
-        const if_reg = bus.io.data[@intFromEnum(IoReg.IF)];
-        const pending = ie & if_reg & 0x1F;
+        const requested = bus.ie_register & bus.io.data[@intFromEnum(IoReg.IF)] & 0x1F;
+        if (requested == 0) return null;
 
-        if (pending == 0) return null;
-
-        // Wake from HALT even if IME is disabled
+        // A physical request wakes HALT immediately even when its CPU sample
+        // latch will not permit dispatch until the next boundary.
         self.halted = false;
+
+        const pending = pendingInterrupts(bus);
+        if (pending == 0) return null;
 
         if (!self.ime) return null;
 
@@ -362,9 +363,7 @@ pub const Cpu = struct {
     }
 
     fn pendingInterrupts(bus: *const Bus) u8 {
-        const ie = bus.ie_register;
-        const if_reg = bus.io.data[@intFromEnum(IoReg.IF)];
-        return ie & if_reg & 0x1F;
+        return bus.io.getPendingInterrupts(bus.ie_register);
     }
 
     fn tickImeEnableDelay(self: *Cpu) void {
@@ -1032,6 +1031,8 @@ pub const Cpu = struct {
     /// Execute one CPU step: handle interrupts, then fetch-decode-execute
     /// Returns the number of cycles used
     pub fn step(self: *Cpu, bus: *Bus) u8 {
+        bus.io.latchLateInterrupts();
+
         // Check for interrupts
         if (self.handleInterrupts(bus, false)) |int_cycles| {
             self.cycles += int_cycles;
@@ -1154,6 +1155,38 @@ test "DI inhibits an interrupt raised during its opcode fetch" {
     try std.testing.expect(!cpu.ime);
     try std.testing.expectEqual(@as(u16, 0xC001), cpu.pc);
     try std.testing.expect((bus.io.data[@intFromEnum(IoReg.IF)] & Interrupt.TIMER) != 0);
+}
+
+test "late-dot interrupt waits for the next CPU boundary" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    cpu.pc = 0xC000;
+    cpu.ime = true;
+    bus.wram[0] = 0x00;
+    bus.ie_register = Interrupt.VBLANK;
+
+    const Hook = struct {
+        bus: *Bus,
+        fired: bool = false,
+
+        fn tick(ptr: *anyopaque, _: u8) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.fired) return;
+            self.fired = true;
+            self.bus.io.requestInterruptLate(Interrupt.VBLANK);
+        }
+    };
+    var hook = Hook{ .bus = &bus };
+    bus.setCycleHook(.{ .context = @ptrCast(&hook), .tickFn = Hook.tick });
+
+    try std.testing.expectEqual(@as(u8, 4), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0xC001), cpu.pc);
+    try std.testing.expectEqual(@as(u8, 20), cpu.step(&bus));
+    try std.testing.expectEqual(@as(u16, 0x0040), cpu.pc);
 }
 
 test "HALT services an interrupt raised during its idle cycle" {
