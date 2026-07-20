@@ -244,13 +244,13 @@ pub const Cartridge = struct {
     pub fn cloneForMachine(self: *const Cartridge, allocator: Allocator) !Cartridge {
         const ram_data: ?[]u8 = if (self.ram_data) |ram| blk: {
             const clone = try allocator.alloc(u8, ram.len);
-            @memset(clone, 0);
+            @memcpy(clone, ram);
             break :blk clone;
         } else null;
         errdefer if (ram_data) |ram| allocator.free(ram);
 
         self.shared_rom.retain();
-        return .{
+        var clone: Cartridge = .{
             .allocator = allocator,
             .shared_rom = self.shared_rom,
             .rom_data = self.shared_rom.data,
@@ -263,6 +263,8 @@ pub const Cartridge = struct {
                 self.header.cartridge_type == 0x0F or self.header.cartridge_type == 0x10,
             ),
         };
+        clone.mbc.restore(self.mbc.snapshot());
+        return clone;
     }
 
     pub fn deinit(self: *Cartridge) void {

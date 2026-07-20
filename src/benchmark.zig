@@ -4,7 +4,10 @@ const bench_cli = @import("bench_cli.zig");
 
 const dmg_clock_hz = 4_194_304.0;
 const fork_count = 1_000;
+const snapshot_count = 1_000;
 const parallel_instruction_limit = 1_000_000;
+const parallel_frame_count = 100;
+const dmg_frames_per_second = 59.727500569606;
 
 const help_text =
     \\Usage: zig build bench -Doptimize=ReleaseFast -- [OPTIONS] <ROM_FILE>
@@ -16,6 +19,7 @@ const help_text =
     \\  -s, --steps <COUNT>    Instructions measured per trial (default 10000000)
     \\  -w, --warmup <COUNT>   Warmup instructions (default 1000000)
     \\  -t, --trials <TRIALS>  Trial count, 1-21 (default 5)
+    \\  --no-video             Preserve PPU timing without framebuffer stores
     \\
 ;
 
@@ -41,7 +45,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.fatal("unable to load ROM '{s}': {s}", .{ rom_path, @errorName(err) });
     };
 
-    var machine = nibble.Machine.init(init.gpa, cartridge, .{ .capture_audio = false });
+    var machine = nibble.Machine.init(init.gpa, cartridge, .{
+        .capture_audio = false,
+        .capture_video = options.capture_video,
+    });
     defer machine.deinit();
     const initial = machine.capture();
 
@@ -80,6 +87,25 @@ pub fn main(init: std.process.Init) !void {
     const frames_per_second = @as(f64, @floatFromInt(measured_frames)) / seconds;
     const cartridge_info = machine.inspectCartridge();
 
+    var owned_snapshot = try machine.captureOwned(init.gpa);
+    defer owned_snapshot.deinit();
+    const owned_snapshot_bytes = owned_snapshot.byteSize();
+
+    const snapshot_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..snapshot_count) |_| {
+        var state = try machine.captureOwned(init.gpa);
+        state.deinit();
+    }
+    const snapshot_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const snapshot_seconds = @as(f64, @floatFromInt(snapshot_finish - snapshot_start)) / std.time.ns_per_s;
+    const snapshots_per_second = snapshot_count / snapshot_seconds;
+
+    const restore_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..snapshot_count) |_| try machine.restoreOwned(&owned_snapshot);
+    const restore_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const restore_seconds = @as(f64, @floatFromInt(restore_finish - restore_start)) / std.time.ns_per_s;
+    const restores_per_second = snapshot_count / restore_seconds;
+
     const fork_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     for (0..fork_count) |_| {
         var branch = try machine.fork(init.gpa);
@@ -108,6 +134,21 @@ pub fn main(init: std.process.Init) !void {
         if (branch.observableDigest() != batch_digest) return error.BatchStateMismatch;
     }
 
+    var frame_results: [32]nibble.FrameStepResult = undefined;
+    const frame_batch_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    try batch.stepFramesParallel(init.io, parallel_frame_count, .{
+        .video = .none,
+        .capture_audio = false,
+    }, frame_results[0..batch_count]);
+    const frame_batch_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const frame_batch_seconds = @as(f64, @floatFromInt(frame_batch_finish - frame_batch_start)) / std.time.ns_per_s;
+    var aggregate_frames: usize = 0;
+    for (frame_results[0..batch_count]) |result| {
+        if (result.timed_out) return error.BatchFrameTimeout;
+        aggregate_frames += result.frames_completed;
+    }
+    const aggregate_frames_per_second = @as(f64, @floatFromInt(aggregate_frames)) / frame_batch_seconds;
+
     try stdout.print("Nibble headless benchmark\n", .{});
     try stdout.print("  ROM: {s} ({s})\n", .{
         cartridge_info.header.getTitle(),
@@ -118,13 +159,19 @@ pub fn main(init: std.process.Init) !void {
         options.trials,
         if (options.trials == 1) "" else "s",
     });
+    try stdout.print("  Video observation: {s}\n", .{if (options.capture_video) "every frame" else "timing only"});
     try stdout.print("  Median: {d:.3} s\n", .{seconds});
     try stdout.print("  Instructions/s: {d:.3}\n", .{instructions_per_second});
     try stdout.print("  T-cycles/s: {d:.3}\n", .{cycles_per_second});
     try stdout.print("  Real-time factor: {d:.2}x\n", .{cycles_per_second / dmg_clock_hz});
     try stdout.print("  Completed frames/s: {d:.3}\n", .{frames_per_second});
     try stdout.print("  State digest: {X:0>16}\n", .{expected_digest.?});
-    try stdout.print("  Forks/s: {d:.3} ({d} byte snapshot)\n", .{
+    try stdout.print("  Owned snapshots/s: {d:.3} capture, {d:.3} restore ({d} bytes)\n", .{
+        snapshots_per_second,
+        restores_per_second,
+        owned_snapshot_bytes,
+    });
+    try stdout.print("  Forks/s: {d:.3} ({d} byte fixed snapshot compatibility type)\n", .{
         forks_per_second,
         @sizeOf(nibble.Snapshot),
     });
@@ -135,6 +182,10 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("  Aggregate T-cycles/s: {d:.3} ({d:.2} realtime machines)\n", .{
         aggregate_cycles_per_second,
         aggregate_cycles_per_second / dmg_clock_hz,
+    });
+    try stdout.print("  Timing-only frame batch: {d:.3} frames/s ({d:.2} realtime machines)\n", .{
+        aggregate_frames_per_second,
+        aggregate_frames_per_second / dmg_frames_per_second,
     });
     try stdout.flush();
 }

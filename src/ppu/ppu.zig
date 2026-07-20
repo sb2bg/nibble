@@ -35,6 +35,12 @@ const LineSprite = struct {
 pub const Ppu = struct {
     frame_buffer: [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor,
 
+    // Pixel capture is a host observation policy, not emulated hardware state.
+    // The fetcher, FIFOs, sprite arbitration, and timing continue to run when
+    // this is false; only the final palette-mapped framebuffer stores are
+    // omitted.
+    capture_pixels: bool,
+
     mode: PpuMode,
     mode_cycles: u32,
     mode3_duration: u16,
@@ -55,7 +61,6 @@ pub const Ppu = struct {
     discard_pixels: u8,
     window_started: bool,
     window_drew_line: bool,
-    bg_color_ids: [SCREEN_WIDTH]u2,
     object_fifo: fifo_mod.ObjectFifo,
     line_sprites: [10]LineSprite,
     line_sprite_count: u4,
@@ -66,6 +71,7 @@ pub const Ppu = struct {
     pub fn init() Ppu {
         return Ppu{
             .frame_buffer = [_][SCREEN_WIDTH]DmgColor{[_]DmgColor{.White} ** SCREEN_WIDTH} ** SCREEN_HEIGHT,
+            .capture_pixels = true,
             .mode = .VBlank,
             .mode_cycles = 0,
             .mode3_duration = 172,
@@ -83,7 +89,6 @@ pub const Ppu = struct {
             .discard_pixels = 0,
             .window_started = false,
             .window_drew_line = false,
-            .bg_color_ids = [_]u2{0} ** SCREEN_WIDTH,
             .object_fifo = .{},
             .line_sprites = [_]LineSprite{.{}} ** 10,
             .line_sprite_count = 0,
@@ -94,6 +99,7 @@ pub const Ppu = struct {
     }
 
     pub fn reset(self: *Ppu) void {
+        const capture_pixels = self.capture_pixels;
         self.mode = .OamSearch;
         self.mode_cycles = 0;
         self.mode3_duration = 172;
@@ -111,7 +117,6 @@ pub const Ppu = struct {
         self.discard_pixels = 0;
         self.window_started = false;
         self.window_drew_line = false;
-        @memset(&self.bg_color_ids, 0);
         self.object_fifo.clear();
         @memset(&self.line_sprites, .{});
         self.line_sprite_count = 0;
@@ -119,6 +124,15 @@ pub const Ppu = struct {
         self.next_sprite = 0;
         self.sprite_fetch_dots = 0;
         @memset(&self.frame_buffer, [_]DmgColor{.White} ** SCREEN_WIDTH);
+        self.capture_pixels = capture_pixels;
+    }
+
+    pub fn setPixelCapture(self: *Ppu, enabled: bool) void {
+        self.capture_pixels = enabled;
+    }
+
+    pub fn isPixelCaptureEnabled(self: *const Ppu) bool {
+        return self.capture_pixels;
     }
 
     fn setMode(self: *Ppu, mode: PpuMode, bus: anytype) void {
@@ -313,7 +327,6 @@ pub const Ppu = struct {
         self.discard_pixels = bus.io.getScx() & 0x07;
         self.window_started = false;
         self.window_drew_line = false;
-        @memset(&self.bg_color_ids, 0);
         self.fetcher.reset(false);
         self.object_fifo.clear();
         self.next_sprite = 0;
@@ -470,18 +483,21 @@ pub const Ppu = struct {
         const lcdc = bus.io.getLcdc();
         const bg_enabled = (lcdc & 0x01) != 0;
         const color_id: u2 = if (bg_enabled) fetched_color_id else 0;
-        self.bg_color_ids[x] = color_id;
 
-        const shift: u3 = @as(u3, color_id) * 2;
-        self.frame_buffer[self.ly][x] = @enumFromInt((bus.io.getBgp() >> shift) & 0x03);
+        if (self.capture_pixels) {
+            const shift: u3 = @as(u3, color_id) * 2;
+            self.frame_buffer[self.ly][x] = @enumFromInt((bus.io.getBgp() >> shift) & 0x03);
+        }
 
         const object = self.object_fifo.pop();
         if ((lcdc & 0x02) != 0 and object.color_id != 0 and
             !(object.behind_background and color_id != 0))
         {
-            const palette = if (object.palette == 0) bus.io.getObp0() else bus.io.getObp1();
-            const object_shift: u3 = @as(u3, object.color_id) * 2;
-            self.frame_buffer[self.ly][x] = @enumFromInt((palette >> object_shift) & 0x03);
+            if (self.capture_pixels) {
+                const palette = if (object.palette == 0) bus.io.getObp0() else bus.io.getObp1();
+                const object_shift: u3 = @as(u3, object.color_id) * 2;
+                self.frame_buffer[self.ly][x] = @enumFromInt((palette >> object_shift) & 0x03);
+            }
         }
 
         self.pixel_x += 1;
@@ -833,7 +849,6 @@ test "mode 3 emits background pixels through the dot FIFO" {
     ppu.tick(172, &bus);
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     try std.testing.expectEqual(@as(u16, SCREEN_WIDTH), ppu.pixel_x);
-    try std.testing.expectEqual(@as(u2, 1), ppu.bg_color_ids[0]);
     try std.testing.expectEqual(DmgColor.Black, ppu.frame_buffer[0][0]);
 }
 

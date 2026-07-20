@@ -8,9 +8,11 @@ const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
 const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
 
 const WINDOW_SCALE = 3;
-const VIEWPORT_X = 16;
-const VIEWPORT_Y = 12;
-const LOGICAL_WIDTH = SCREEN_WIDTH + VIEWPORT_X * 2;
+const VIEWPORT_X = 8;
+const VIEWPORT_Y = 8;
+const PANEL_X = VIEWPORT_X + SCREEN_WIDTH + 8;
+const PANEL_WIDTH = 72;
+const LOGICAL_WIDTH = PANEL_X + PANEL_WIDTH + 8;
 const LOGICAL_HEIGHT = SCREEN_HEIGHT + VIEWPORT_Y * 2;
 const AUDIO_BATCH_SAMPLES = 128;
 const MAX_QUEUED_AUDIO_BYTES = apu_mod.SAMPLE_RATE * @sizeOf(StereoSample) / 10;
@@ -36,7 +38,25 @@ pub const UiActions = struct {
     prev_slot: bool = false,
     next_slot: bool = false,
     toggle_mute: bool = false,
+    step_instruction: bool = false,
     redraw: bool = false,
+};
+
+/// A copied, presentation-only view of the machine. Static mnemonic strings
+/// are supplied by the decoder; all mutable emulator state remains in Machine.
+pub const InspectorState = struct {
+    pc: u16 = 0,
+    sp: u16 = 0,
+    af: u16 = 0,
+    bc: u16 = 0,
+    de: u16 = 0,
+    hl: u16 = 0,
+    cycles: u64 = 0,
+    frames: usize = 0,
+    upper_rom_bank: u16 = 0,
+    effective_ram_bank: usize = 0,
+    fps_x100: u32 = 0,
+    mnemonic: []const u8 = "nop",
 };
 
 /// SDL owns host presentation and input. It deliberately has no authority
@@ -53,6 +73,8 @@ pub const SdlFrontend = struct {
     ui_slot_has_state: bool = false,
     ui_message: [48]u8 = [_]u8{0} ** 48,
     ui_message_len: usize = 0,
+    inspector: InspectorState = .{},
+    inspector_visible: bool = true,
 
     prev_pause_key: bool = false,
     prev_reset_key: bool = false,
@@ -64,6 +86,8 @@ pub const SdlFrontend = struct {
     prev_palette_key: bool = false,
     prev_fullscreen_key: bool = false,
     prev_mute_key: bool = false,
+    prev_inspector_key: bool = false,
+    prev_step_key: bool = false,
     palette_index: usize = 0,
     fullscreen: bool = false,
 
@@ -152,6 +176,7 @@ pub const SdlFrontend = struct {
         }
 
         sdl.updateTexture(self.texture, null, pixels[0..], SCREEN_WIDTH * 4) catch {};
+        sdl.setRenderDrawColor(self.renderer, 0x08, 0x0D, 0x11, 0xFF) catch {};
         sdl.renderClear(self.renderer) catch {};
         const viewport: sdl.Rect = .{
             .x = VIEWPORT_X,
@@ -160,6 +185,7 @@ pub const SdlFrontend = struct {
             .h = SCREEN_HEIGHT,
         };
         sdl.renderCopy(self.renderer, self.texture, null, &viewport) catch {};
+        if (self.inspector_visible) self.drawInspector();
         sdl.renderPresent(self.renderer);
     }
 
@@ -196,6 +222,12 @@ pub const SdlFrontend = struct {
             actions.prev_slot = edgePressed(&self.prev_prev_slot_key, isPressed(keys, sdl.SCANCODE_LEFTBRACKET));
             actions.next_slot = edgePressed(&self.prev_next_slot_key, isPressed(keys, sdl.SCANCODE_RIGHTBRACKET));
             actions.toggle_mute = edgePressed(&self.prev_mute_key, isPressed(keys, sdl.SCANCODE_M));
+            actions.step_instruction = edgePressed(&self.prev_step_key, isPressed(keys, sdl.SCANCODE_F10));
+
+            if (edgePressed(&self.prev_inspector_key, isPressed(keys, sdl.SCANCODE_F1))) {
+                self.inspector_visible = !self.inspector_visible;
+                actions.redraw = true;
+            }
 
             if (edgePressed(&self.prev_palette_key, isPressed(keys, sdl.SCANCODE_C))) {
                 self.palette_index = (self.palette_index + 1) % palettes.len;
@@ -219,6 +251,8 @@ pub const SdlFrontend = struct {
             self.prev_palette_key = false;
             self.prev_fullscreen_key = false;
             self.prev_mute_key = false;
+            self.prev_inspector_key = false;
+            self.prev_step_key = false;
         }
 
         return actions;
@@ -257,6 +291,10 @@ pub const SdlFrontend = struct {
     pub fn redraw(self: *SdlFrontend, frame: *const [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor) void {
         self.refreshWindowTitle();
         self.present(frame);
+    }
+
+    pub fn setInspector(self: *SdlFrontend, inspector: InspectorState) void {
+        self.inspector = inspector;
     }
 
     pub fn audioBatchReady(self: *const SdlFrontend, sample_count: usize) bool {
@@ -313,6 +351,39 @@ pub const SdlFrontend = struct {
         sdl.setWindowTitle(self.window, title);
     }
 
+    fn drawInspector(self: *SdlFrontend) void {
+        const panel: sdl.Rect = .{
+            .x = PANEL_X,
+            .y = VIEWPORT_Y,
+            .w = PANEL_WIDTH,
+            .h = SCREEN_HEIGHT,
+        };
+        sdl.setRenderDrawColor(self.renderer, 0x10, 0x1B, 0x21, 0xFF) catch {};
+        sdl.fillRect(self.renderer, &panel) catch {};
+
+        const text = 0xD8E8E0;
+        const muted = 0x7A918A;
+        const accent = palettes[self.palette_index].colors[1];
+        drawText(self.renderer, "NIBBLE LAB", PANEL_X + 5, 13, accent);
+        drawText(self.renderer, if (self.ui_paused) "PAUSED" else "RUNNING", PANEL_X + 5, 23, if (self.ui_paused) 0xFFBE55 else text);
+
+        var buf: [32]u8 = undefined;
+        drawFormatted(self.renderer, &buf, "PC {X:0>4}", .{self.inspector.pc}, PANEL_X + 5, 34, text);
+        drawText(self.renderer, self.inspector.mnemonic, PANEL_X + 5, 42, accent);
+        drawFormatted(self.renderer, &buf, "AF {X:0>4}", .{self.inspector.af}, PANEL_X + 5, 52, text);
+        drawFormatted(self.renderer, &buf, "BC {X:0>4}", .{self.inspector.bc}, PANEL_X + 5, 60, text);
+        drawFormatted(self.renderer, &buf, "DE {X:0>4}", .{self.inspector.de}, PANEL_X + 5, 68, text);
+        drawFormatted(self.renderer, &buf, "HL {X:0>4}", .{self.inspector.hl}, PANEL_X + 5, 76, text);
+        drawFormatted(self.renderer, &buf, "SP {X:0>4}", .{self.inspector.sp}, PANEL_X + 5, 84, text);
+        drawFormatted(self.renderer, &buf, "ROM {X:0>3}", .{self.inspector.upper_rom_bank}, PANEL_X + 5, 95, text);
+        drawFormatted(self.renderer, &buf, "RAM {X:0>2}", .{self.inspector.effective_ram_bank}, PANEL_X + 5, 103, text);
+        drawFormatted(self.renderer, &buf, "FRAME {d}", .{self.inspector.frames}, PANEL_X + 5, 114, text);
+        drawFormatted(self.renderer, &buf, "{d}.{d:0>2} FPS", .{ self.inspector.fps_x100 / 100, self.inspector.fps_x100 % 100 }, PANEL_X + 5, 122, accent);
+
+        drawFormatted(self.renderer, &buf, "DOT {X:0>8}", .{@as(u32, @truncate(self.inspector.cycles))}, PANEL_X + 5, 133, text);
+        drawText(self.renderer, "F10 STEP", PANEL_X + 5, 143, if (self.ui_paused) accent else muted);
+    }
+
     fn edgePressed(previous: *bool, current: bool) bool {
         const pressed = current and !previous.*;
         previous.* = current;
@@ -327,6 +398,98 @@ pub const SdlFrontend = struct {
         return palettes[self.palette_index].colors[@intFromEnum(color)];
     }
 };
+
+fn drawFormatted(
+    renderer: *sdl.Renderer,
+    buffer: []u8,
+    comptime format: []const u8,
+    args: anytype,
+    x: c_int,
+    y: c_int,
+    rgb: u32,
+) void {
+    const rendered = std.fmt.bufPrint(buffer, format, args) catch return;
+    drawText(renderer, rendered, x, y, rgb);
+}
+
+/// Draw a dependency-free 3x5 pixel font. Keeping the inspector in SDL's
+/// logical coordinate space makes it crisp under integer and HiDPI scaling.
+fn drawText(renderer: *sdl.Renderer, text: []const u8, start_x: c_int, y: c_int, rgb: u32) void {
+    sdl.setRenderDrawColor(
+        renderer,
+        @intCast((rgb >> 16) & 0xFF),
+        @intCast((rgb >> 8) & 0xFF),
+        @intCast(rgb & 0xFF),
+        0xFF,
+    ) catch return;
+
+    var x = start_x;
+    for (text) |raw| {
+        const bits = glyphBits(std.ascii.toUpper(raw));
+        for (0..5) |row| {
+            for (0..3) |column| {
+                const shift: u4 = @intCast(14 - (row * 3 + column));
+                if ((bits & (@as(u15, 1) << shift)) == 0) continue;
+                const pixel: sdl.Rect = .{
+                    .x = x + @as(c_int, @intCast(column)),
+                    .y = y + @as(c_int, @intCast(row)),
+                    .w = 1,
+                    .h = 1,
+                };
+                sdl.fillRect(renderer, &pixel) catch return;
+            }
+        }
+        x += 4;
+        if (x >= LOGICAL_WIDTH - 3) return;
+    }
+}
+
+fn glyphBits(character: u8) u15 {
+    return switch (character) {
+        'A' => 0b010_101_111_101_101,
+        'B' => 0b110_101_110_101_110,
+        'C' => 0b011_100_100_100_011,
+        'D' => 0b110_101_101_101_110,
+        'E' => 0b111_100_110_100_111,
+        'F' => 0b111_100_110_100_100,
+        'G' => 0b011_100_101_101_011,
+        'H' => 0b101_101_111_101_101,
+        'I' => 0b111_010_010_010_111,
+        'J' => 0b001_001_001_101_010,
+        'K' => 0b101_101_110_101_101,
+        'L' => 0b100_100_100_100_111,
+        'M' => 0b101_111_111_101_101,
+        'N' => 0b101_111_111_111_101,
+        'O' => 0b010_101_101_101_010,
+        'P' => 0b110_101_110_100_100,
+        'Q' => 0b010_101_101_111_011,
+        'R' => 0b110_101_110_101_101,
+        'S' => 0b011_100_010_001_110,
+        'T' => 0b111_010_010_010_010,
+        'U' => 0b101_101_101_101_111,
+        'V' => 0b101_101_101_101_010,
+        'W' => 0b101_101_111_111_101,
+        'X' => 0b101_101_010_101_101,
+        'Y' => 0b101_101_010_010_010,
+        'Z' => 0b111_001_010_100_111,
+        '0' => 0b111_101_101_101_111,
+        '1' => 0b010_110_010_010_111,
+        '2' => 0b110_001_010_100_111,
+        '3' => 0b110_001_010_001_110,
+        '4' => 0b101_101_111_001_001,
+        '5' => 0b111_100_110_001_110,
+        '6' => 0b011_100_110_101_010,
+        '7' => 0b111_001_010_010_010,
+        '8' => 0b010_101_010_101_010,
+        '9' => 0b010_101_011_001_110,
+        '.' => 0b000_000_000_000_010,
+        '-' => 0b000_000_111_000_000,
+        ':' => 0b000_010_000_010_000,
+        '/' => 0b001_001_010_100_100,
+        ' ' => 0,
+        else => 0b111_001_010_000_010,
+    };
+}
 
 fn initAudio() !sdl.AudioDeviceId {
     try sdl.initSubSystem(sdl.INIT_AUDIO);
@@ -344,4 +507,10 @@ fn initAudio() !sdl.AudioDeviceId {
     const device = try sdl.openAudioDevice(&desired);
     sdl.pauseAudioDevice(device, false);
     return device;
+}
+
+test "inspector font covers labels and digits" {
+    try std.testing.expectEqual(@as(u15, 0), glyphBits(' '));
+    try std.testing.expect(glyphBits('N') != 0);
+    try std.testing.expect(glyphBits('0') != 0);
 }

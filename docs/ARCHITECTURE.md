@@ -6,6 +6,28 @@ T-cycles, and the scheduler advances the PPU, timer, APU, DMA engine, serial
 engine, and cartridge clock by the same amount. `Emulator` is an application
 adapter that owns SDL, host clocks, frame pacing, pause state, and UI save slots.
 
+## Assessment
+
+The architecture is strong at its boundaries: deterministic hardware is owned
+below `Machine`; host IO and policy stay in `Emulator`; the debugger wraps
+rather than infects the interpreter; and immutable ROM ownership is separate
+from branch-local mutable state. Those choices make headless embedding,
+snapshots, parallel machines, and the SDL application share one hardware core.
+
+Its main weakness is inside the performance/fidelity boundary. CPU bus timing
+uses an indirect cycle hook, and the dot PPU has enough persistent microstate
+that it cannot safely jump across active rendering yet. The object fetcher also
+retains the approximations documented below. These are localized engineering
+debts rather than cross-layer coupling, but they prevent Nibble from claiming
+either cycle-perfect hardware or 100x single-machine speed today. Snapshot
+types are in-process state, not a versioned persistent file format.
+
+The research-runtime work strengthens the existing design instead of adding a
+second emulator path: observation policy, deterministic inputs/resets,
+snapshots, forks, batches, instrumentation, and the GUI inspector all compose
+around the same `Machine` scheduler. See [RESEARCH_RUNTIME.md](RESEARCH_RUNTIME.md)
+for the workload model, measured performance, and demo direction.
+
 ## Component boundaries
 
 - `Cpu` owns LR35902 register and interrupt-execution state. It reaches memory
@@ -41,27 +63,51 @@ convenience on `Cartridge`; `Cartridge.fromRom` is the in-memory boundary.
 
 Host outputs are explicit. Disabling PCM capture skips sample mixing but never
 disables APU registers, generators, the frame sequencer, or wave-RAM access
-windows. Similarly, a non-intrusive `peek` does not consume a bus cycle or cause
-CPU-only DMA/PPU arbitration side effects.
+windows. Pixel capture follows the same rule: timing-only and final-frame modes
+retain the fetcher, FIFOs, sprite arbitration, palette timing, and frame edges,
+while omitting framebuffer stores that the caller will not observe. `stepFrames`
+applies caller-owned input timelines at deterministic frame boundaries, and
+`observe` returns borrowed memory, tile-map, CPU, and framebuffer views without
+allocating. Cycle-input timelines are split inside the CPU's bus hook, so an
+input transition can land on an exact T-cycle even when the enclosing
+instruction finishes later. MBC3 clocks are seeded from explicit emulated state,
+never host wall time, and deterministic episode resets may clear external RAM.
+Similarly, a non-intrusive `peek` does not consume a bus cycle or cause CPU-only
+DMA/PPU arbitration side effects.
 
-`Machine.Snapshot` captures component-owned state, while immutable ROM data and
-owned allocations remain in place. Any newly persistent hardware field should
-be added to its component snapshot at the same time it is introduced. Snapshot
-restore clears host output queues because queued serial text and PCM are effects,
-not hardware state. The observable-state digest is a replay/regression identity,
-not a serialized save-state format or cryptographic hash.
+`Machine.Snapshot` captures component-owned state without allocation, while
+immutable ROM data and owned allocations remain in place. Its fixed cartridge
+RAM capacity is useful for save slots but wasteful in large search trees, so
+`OwnedSnapshot` stores only the loaded cartridge's actual RAM. Any newly
+persistent hardware field should be added to the shared core snapshot at the
+same time it is introduced. Snapshot restore clears host output queues because
+queued serial text and PCM are effects, not hardware state. The observable-state
+digest is a replay/regression identity, not a serialized save-state format or
+cryptographic hash.
 
-`Machine.fork` constructs an independent mutable machine from a snapshot while
-retaining the cartridge's immutable ROM allocation through an atomic reference
-count. Each branch owns its IO allocations, external cartridge RAM, mapper, and
-peripheral state, so branches may be scheduled on different workers after they
-are created.
+`Machine.fork` constructs an independent mutable machine while retaining the
+cartridge's immutable ROM allocation through an atomic reference count. It
+copies hardware directly into the branch instead of materializing a fixed-size
+snapshot. Each branch owns its IO allocations, external cartridge RAM, mapper,
+and peripheral state, so branches may be scheduled on different workers after
+they are created.
 
 `MachineBatch` partitions independent machines into at most one chunk per host
 CPU and schedules those chunks with Zig 0.16's `std.Io.Group.concurrent`. The
 emulation loop itself remains single-threaded and deterministic; concurrency is
 only introduced across machines. Backends that cannot guarantee concurrency
-fall back to completing unsubmitted chunks on the caller.
+fall back to completing unsubmitted chunks on the caller. Instruction, bounded
+single-frame, and observation-selective multi-frame operations share this
+partitioning. `stepFramesWithButtonsParallel` combines machine-ordered actions
+with a shared frame-repeat interval, while caller-provided result slices
+preserve machine order without allocating in the batch API.
+
+`Debugger` is an optional execution adapter rather than a dependency of the
+machine core. It checks PC breakpoints before stepping, compares caller-selected
+memory values at instruction boundaries, records mapper-bank and frame changes,
+and keeps a bounded event ring. Disassembly uses `peek`, so inspection neither
+advances time nor changes bus arbitration. Keeping this layer outside `Machine`
+means disabled tracing has zero branches in the normal interpreter loop.
 
 ## Accuracy model
 

@@ -9,8 +9,10 @@ const Timer = @import("timer.zig").Timer;
 const Serial = @import("serial.zig").Serial;
 const apu_mod = @import("apu.zig");
 const Apu = apu_mod.Apu;
-const Mbc = @import("memory/mbc.zig").Mbc;
-const Ppu = @import("ppu/ppu.zig").Ppu;
+const mbc_mod = @import("memory/mbc.zig");
+const Mbc = mbc_mod.Mbc;
+const ppu_mod = @import("ppu/ppu.zig");
+const Ppu = ppu_mod.Ppu;
 
 const MAX_CART_RAM_BYTES = 128 * 1024;
 
@@ -19,6 +21,14 @@ pub const MachineOptions = struct {
     /// capture avoids mixing samples in simulations that only observe memory
     /// or video, while all APU registers and channel generators still tick.
     capture_audio: bool = false,
+
+    /// Framebuffer pixels are host-observable output. Disabling their capture
+    /// retains the complete PPU fetch/FIFO/timing path and only omits final
+    /// palette-mapped framebuffer stores.
+    capture_video: bool = true,
+
+    /// Optional deterministic power-on value for cartridges with an MBC3 RTC.
+    rtc_seed: ?mbc_mod.RtcSeed = null,
 };
 
 pub const MooneyeResult = enum {
@@ -29,6 +39,87 @@ pub const MooneyeResult = enum {
 pub const StepResult = struct {
     cycles: u8,
     frame_ready: bool,
+};
+
+pub const VideoObservation = enum {
+    /// Do not update the framebuffer during this run.
+    none,
+    /// Capture only the last requested frame. Useful for frame skipping and AI.
+    final_frame,
+    /// Capture every completed frame for callers that inspect between steps.
+    every_frame,
+};
+
+pub const FrameStepOptions = struct {
+    video: VideoObservation = .final_frame,
+    /// Null keeps the machine's configured PCM policy for this run.
+    capture_audio: ?bool = null,
+    /// Prevent an LCD-disabled or crashed ROM from blocking the caller.
+    max_instructions_per_frame: usize = 1_000_000,
+};
+
+pub const FrameStepResult = struct {
+    frames_completed: usize,
+    instructions: usize,
+    cycles: u64,
+    timed_out: bool,
+};
+
+/// Input applied immediately before a requested frame begins. Events must be
+/// sorted by `frame_offset`; duplicate offsets are allowed and apply in order.
+pub const FrameInput = struct {
+    frame_offset: usize,
+    buttons: Buttons,
+};
+
+/// Input transition at an absolute emulated T-cycle. A transition that lands
+/// inside an instruction is applied between peripheral dots before execution
+/// continues, including before a bus read committed at that boundary.
+pub const CycleInput = struct {
+    cycle: u64,
+    buttons: Buttons,
+};
+
+pub const CycleStepResult = struct {
+    requested_cycle: u64,
+    reached_cycle: u64,
+    instructions: usize,
+};
+
+pub const ResetOptions = struct {
+    /// AI/research resets normally begin without battery-backed episode state.
+    clear_cartridge_ram: bool = true,
+    rtc_seed: mbc_mod.RtcSeed = .{},
+    buttons: Buttons = .{},
+};
+
+pub const RtcSeed = mbc_mod.RtcSeed;
+
+pub const CpuObservation = struct {
+    af: u16,
+    bc: u16,
+    de: u16,
+    hl: u16,
+    sp: u16,
+    pc: u16,
+    ime: bool,
+    halted: bool,
+    cycles: u64,
+};
+
+/// Borrowed, allocation-free view of state commonly consumed by agents. The
+/// slices remain valid until the machine is stepped, restored, or destroyed.
+pub const Observation = struct {
+    cpu: CpuObservation,
+    instructions: usize,
+    frames: usize,
+    wram: []const u8,
+    hram: []const u8,
+    vram: []const u8,
+    oam: []const u8,
+    background_tilemap: []const u8,
+    window_tilemap: []const u8,
+    frame_buffer: *const [ppu_mod.SCREEN_HEIGHT][ppu_mod.SCREEN_WIDTH]ppu_mod.DmgColor,
 };
 
 pub const Buttons = struct {
@@ -71,7 +162,7 @@ const IoState = struct {
     late_interrupts: u8,
 };
 
-const BusState = struct {
+const CoreBusState = struct {
     wram: [0x2000]u8,
     hram: [0x7F]u8,
     oam: [0xA0]u8,
@@ -83,18 +174,44 @@ const BusState = struct {
     apu: Apu,
     dma: Dma,
     mbc: Mbc.Snapshot,
+};
+
+const CoreSnapshot = struct {
+    cpu: CpuState,
+    bus: CoreBusState,
+    ppu: Ppu,
+    steps: usize,
+    frames: usize,
+};
+
+/// A complete, allocation-free mutable machine snapshot. The fixed cartridge
+/// RAM reserve preserves the original value API; branch-heavy callers should
+/// prefer `OwnedSnapshot`, which stores only the cartridge RAM actually used.
+pub const Snapshot = struct {
+    core: CoreSnapshot,
     cart_ram_len: usize,
     cart_ram: [MAX_CART_RAM_BYTES]u8,
 };
 
-/// A complete mutable machine snapshot. ROM bytes and allocation ownership are
-/// deliberately excluded, so restoring never invalidates host-owned storage.
-pub const Snapshot = struct {
-    cpu: CpuState,
-    bus: BusState,
-    ppu: Ppu,
-    steps: usize,
-    frames: usize,
+pub const OwnedSnapshot = struct {
+    allocator: Allocator,
+    core: CoreSnapshot,
+    cartridge_ram: []u8,
+
+    pub fn deinit(self: *OwnedSnapshot) void {
+        self.allocator.free(self.cartridge_ram);
+        self.* = undefined;
+    }
+
+    pub fn byteSize(self: *const OwnedSnapshot) usize {
+        return @sizeOf(CoreSnapshot) + self.cartridge_ram.len;
+    }
+};
+
+const CycleInputCursor = struct {
+    inputs: []const CycleInput,
+    index: usize = 0,
+    cycle: u64,
 };
 
 /// Frontend-free deterministic DMG simulation core.
@@ -111,12 +228,15 @@ pub const Machine = struct {
     frames: usize = 0,
 
     pub fn init(allocator: Allocator, cartridge: Cartridge, options: MachineOptions) Machine {
-        return .{
+        var machine: Machine = .{
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
             .ppu = Ppu.init(),
             .options = options,
         };
+        machine.ppu.setPixelCapture(options.capture_video);
+        if (options.rtc_seed) |seed| machine.bus.cartridge.mbc.seedRtc(seed);
+        return machine;
     }
 
     pub fn deinit(self: *Machine) void {
@@ -129,7 +249,7 @@ pub const Machine = struct {
     pub fn fork(self: *const Machine, allocator: Allocator) !Machine {
         const cartridge = try self.bus.cartridge.cloneForMachine(allocator);
         var branch = Machine.init(allocator, cartridge, self.options);
-        branch.restore(self.capture());
+        self.copyHardwareStateTo(&branch);
         return branch;
     }
 
@@ -137,6 +257,10 @@ pub const Machine = struct {
     /// emulated phase. The callback is an internal compatibility bridge; the
     /// public machine API itself has no host callbacks.
     pub fn step(self: *Machine) StepResult {
+        return self.stepWithCycleInputs(null);
+    }
+
+    fn stepWithCycleInputs(self: *Machine, cycle_inputs: ?*CycleInputCursor) StepResult {
         var clocked_cycles: u16 = 0;
         var frame_ready = false;
 
@@ -144,10 +268,11 @@ pub const Machine = struct {
             machine: *Machine,
             clocked: *u16,
             frame_ready: *bool,
+            cycle_inputs: ?*CycleInputCursor,
 
             fn tick(ptr: *anyopaque, cycles: u8) void {
                 const ctx: *@This() = @ptrCast(@alignCast(ptr));
-                ctx.machine.tickPeripherals(cycles, ctx.frame_ready);
+                ctx.machine.tickWithCycleInputs(cycles, ctx.frame_ready, ctx.cycle_inputs);
                 ctx.clocked.* +%= cycles;
             }
         };
@@ -155,6 +280,7 @@ pub const Machine = struct {
             .machine = self,
             .clocked = &clocked_cycles,
             .frame_ready = &frame_ready,
+            .cycle_inputs = cycle_inputs,
         };
         self.bus.setCycleHook(.{
             .context = @ptrCast(&hook_ctx),
@@ -165,7 +291,7 @@ pub const Machine = struct {
         const cycles = self.cpu.step(&self.bus);
         if (clocked_cycles < @as(u16, cycles)) {
             const remaining: u8 = @intCast(@as(u16, cycles) - clocked_cycles);
-            self.tickPeripherals(remaining, &frame_ready);
+            self.tickWithCycleInputs(remaining, &frame_ready, cycle_inputs);
         }
 
         self.steps += 1;
@@ -176,6 +302,39 @@ pub const Machine = struct {
         for (0..count) |_| _ = self.step();
     }
 
+    /// Advance until at least `target_cycle`, applying sorted input transitions
+    /// at their exact T-cycle even when the final instruction overshoots it.
+    pub fn runUntilCycle(
+        self: *Machine,
+        target_cycle: u64,
+        inputs: []const CycleInput,
+    ) error{ CycleInPast, InputOutsideRange, UnsortedInputs }!CycleStepResult {
+        if (target_cycle < self.cpu.cycles) return error.CycleInPast;
+
+        var previous_cycle = self.cpu.cycles;
+        for (inputs, 0..) |input, index| {
+            if (input.cycle < self.cpu.cycles or input.cycle > target_cycle) {
+                return error.InputOutsideRange;
+            }
+            if (index != 0 and input.cycle < previous_cycle) return error.UnsortedInputs;
+            previous_cycle = input.cycle;
+        }
+
+        var cursor: CycleInputCursor = .{
+            .inputs = inputs,
+            .cycle = self.cpu.cycles,
+        };
+        self.applyCycleInputsAtCurrent(&cursor);
+        const start_steps = self.steps;
+        while (self.cpu.cycles < target_cycle) _ = self.stepWithCycleInputs(&cursor);
+
+        return .{
+            .requested_cycle = target_cycle,
+            .reached_cycle = self.cpu.cycles,
+            .instructions = self.steps - start_steps,
+        };
+    }
+
     /// Run until the next completed video frame, bounded so a ROM that turns
     /// the LCD off cannot trap an automation caller indefinitely.
     pub fn runUntilFrame(self: *Machine, max_instructions: usize) ?usize {
@@ -184,6 +343,102 @@ pub const Machine = struct {
             if (self.step().frame_ready) return self.steps - start;
         }
         return null;
+    }
+
+    /// Advance a fixed number of video frames without allocating. Output
+    /// capture can be reduced independently from hardware timing.
+    pub fn stepFrames(
+        self: *Machine,
+        frame_count: usize,
+        options: FrameStepOptions,
+    ) FrameStepResult {
+        return self.stepFramesWithInputs(frame_count, &.{}, options) catch unreachable;
+    }
+
+    /// Apply a caller-owned input timeline at deterministic frame boundaries
+    /// while advancing the requested number of frames.
+    pub fn stepFramesWithInputs(
+        self: *Machine,
+        frame_count: usize,
+        inputs: []const FrameInput,
+        options: FrameStepOptions,
+    ) error{ InvalidInputFrame, UnsortedInputs }!FrameStepResult {
+        var previous_offset: usize = 0;
+        for (inputs, 0..) |input, index| {
+            if (input.frame_offset >= frame_count) return error.InvalidInputFrame;
+            if (index != 0 and input.frame_offset < previous_offset) return error.UnsortedInputs;
+            previous_offset = input.frame_offset;
+        }
+
+        const start_steps = self.steps;
+        const start_cycles = self.cpu.cycles;
+        const original_video = self.ppu.isPixelCaptureEnabled();
+        const original_audio = self.options.capture_audio;
+        defer {
+            self.ppu.setPixelCapture(original_video);
+            self.options.capture_audio = original_audio;
+        }
+        if (options.capture_audio) |capture_enabled| self.options.capture_audio = capture_enabled;
+
+        var completed: usize = 0;
+        var input_index: usize = 0;
+        while (completed < frame_count) {
+            while (input_index < inputs.len and inputs[input_index].frame_offset == completed) : (input_index += 1) {
+                self.setButtons(inputs[input_index].buttons);
+            }
+
+            const capture_frame = switch (options.video) {
+                .none => false,
+                .final_frame => completed + 1 == frame_count,
+                .every_frame => true,
+            };
+            self.ppu.setPixelCapture(capture_frame);
+
+            if (self.runUntilFrame(options.max_instructions_per_frame) == null) {
+                return .{
+                    .frames_completed = completed,
+                    .instructions = self.steps - start_steps,
+                    .cycles = self.cpu.cycles - start_cycles,
+                    .timed_out = true,
+                };
+            }
+            completed += 1;
+        }
+
+        return .{
+            .frames_completed = completed,
+            .instructions = self.steps - start_steps,
+            .cycles = self.cpu.cycles - start_cycles,
+            .timed_out = false,
+        };
+    }
+
+    pub fn observe(self: *const Machine) Observation {
+        const lcdc = self.bus.io.getLcdc();
+        const background_offset: usize = if ((lcdc & 0x08) != 0) 0x1C00 else 0x1800;
+        const window_offset: usize = if ((lcdc & 0x40) != 0) 0x1C00 else 0x1800;
+        return .{
+            .cpu = .{
+                .af = self.cpu.af,
+                .bc = self.cpu.bc,
+                .de = self.cpu.de,
+                .hl = self.cpu.hl,
+                .sp = self.cpu.sp,
+                .pc = self.cpu.pc,
+                .ime = self.cpu.ime,
+                .halted = self.cpu.halted,
+                .cycles = self.cpu.cycles,
+            },
+            .instructions = self.steps,
+            .frames = self.frames,
+            .wram = &self.bus.wram,
+            .hram = &self.bus.hram,
+            .vram = &self.bus.vram,
+            .oam = &self.bus.oam,
+            .background_tilemap = self.bus.vram[background_offset..][0..0x400],
+            .window_tilemap = self.bus.vram[window_offset..][0..0x400],
+            .frame_buffer = &self.ppu.frame_buffer,
+        };
     }
 
     pub fn setButtons(self: *Machine, buttons: Buttons) void {
@@ -207,46 +462,60 @@ pub const Machine = struct {
         self.frames = 0;
     }
 
+    /// Reinitialize an episode without consulting host time or retaining
+    /// accidental battery/RTC state from a prior run.
+    pub fn resetDeterministic(self: *Machine, options: ResetOptions) void {
+        self.reset();
+        if (options.clear_cartridge_ram) {
+            if (self.bus.cartridge.ram_data) |ram| @memset(ram, 0);
+        }
+        self.bus.cartridge.mbc.seedRtc(options.rtc_seed);
+        self.setButtons(options.buttons);
+    }
+
     pub fn capture(self: *const Machine) Snapshot {
-        return .{
-            .cpu = .{
-                .af = self.cpu.af,
-                .bc = self.cpu.bc,
-                .de = self.cpu.de,
-                .hl = self.cpu.hl,
-                .sp = self.cpu.sp,
-                .pc = self.cpu.pc,
-                .ime = self.cpu.ime,
-                .ime_enable_delay = self.cpu.ime_enable_delay,
-                .halted = self.cpu.halted,
-                .halt_bug = self.cpu.halt_bug,
-                .cycles = self.cpu.cycles,
-            },
-            .bus = self.captureBusState(),
-            .ppu = self.ppu,
-            .steps = self.steps,
-            .frames = self.frames,
+        var snapshot: Snapshot = .{
+            .core = self.captureCoreState(),
+            .cart_ram_len = 0,
+            .cart_ram = [_]u8{0} ** MAX_CART_RAM_BYTES,
         };
+        if (self.bus.cartridge.ram_data) |ram| {
+            snapshot.cart_ram_len = @min(ram.len, MAX_CART_RAM_BYTES);
+            @memcpy(snapshot.cart_ram[0..snapshot.cart_ram_len], ram[0..snapshot.cart_ram_len]);
+        }
+        return snapshot;
     }
 
     pub fn restore(self: *Machine, state: Snapshot) void {
-        self.cpu.af = state.cpu.af;
-        self.cpu.bc = state.cpu.bc;
-        self.cpu.de = state.cpu.de;
-        self.cpu.hl = state.cpu.hl;
-        self.cpu.sp = state.cpu.sp;
-        self.cpu.pc = state.cpu.pc;
-        self.cpu.ime = state.cpu.ime;
-        self.cpu.ime_enable_delay = state.cpu.ime_enable_delay;
-        self.cpu.halted = state.cpu.halted;
-        self.cpu.halt_bug = state.cpu.halt_bug;
-        self.cpu.cycles = state.cpu.cycles;
-        self.cpu.reader_ctx = undefined;
+        self.applyCoreState(state.core);
+        if (self.bus.cartridge.ram_data) |ram| {
+            const len = @min(@min(ram.len, MAX_CART_RAM_BYTES), state.cart_ram_len);
+            if (len > 0) @memcpy(ram[0..len], state.cart_ram[0..len]);
+            if (ram.len > len) @memset(ram[len..], 0);
+        }
+    }
 
-        self.applyBusState(state.bus);
-        self.ppu = state.ppu;
-        self.steps = state.steps;
-        self.frames = state.frames;
+    /// Capture a complete save state using only the cartridge RAM length this
+    /// machine actually owns. The caller owns the result and must call deinit.
+    pub fn captureOwned(self: *const Machine, allocator: Allocator) !OwnedSnapshot {
+        const ram_len = if (self.bus.cartridge.ram_data) |ram| ram.len else 0;
+        const cartridge_ram = try allocator.alloc(u8, ram_len);
+        if (self.bus.cartridge.ram_data) |ram| @memcpy(cartridge_ram, ram);
+        return .{
+            .allocator = allocator,
+            .core = self.captureCoreState(),
+            .cartridge_ram = cartridge_ram,
+        };
+    }
+
+    pub fn restoreOwned(
+        self: *Machine,
+        state: *const OwnedSnapshot,
+    ) error{CartridgeRamSizeMismatch}!void {
+        const ram_len = if (self.bus.cartridge.ram_data) |ram| ram.len else 0;
+        if (ram_len != state.cartridge_ram.len) return error.CartridgeRamSizeMismatch;
+        self.applyCoreState(state.core);
+        if (self.bus.cartridge.ram_data) |ram| @memcpy(ram, state.cartridge_ram);
     }
 
     pub fn inspectCartridge(self: *const Machine) Cartridge.Inspection {
@@ -321,6 +590,46 @@ pub const Machine = struct {
         });
     }
 
+    fn applyCycleInputsAtCurrent(self: *Machine, cursor: *CycleInputCursor) void {
+        while (cursor.index < cursor.inputs.len and
+            cursor.inputs[cursor.index].cycle == cursor.cycle) : (cursor.index += 1)
+        {
+            self.setButtons(cursor.inputs[cursor.index].buttons);
+        }
+    }
+
+    fn tickWithCycleInputs(
+        self: *Machine,
+        cycles: u8,
+        frame_ready: *bool,
+        maybe_cursor: ?*CycleInputCursor,
+    ) void {
+        const cursor = maybe_cursor orelse {
+            self.tickPeripherals(cycles, frame_ready);
+            return;
+        };
+
+        var remaining = cycles;
+        while (cursor.index < cursor.inputs.len) {
+            const event_cycle = cursor.inputs[cursor.index].cycle;
+            const end_cycle = cursor.cycle + remaining;
+            if (event_cycle > end_cycle) break;
+
+            const prefix: u8 = @intCast(event_cycle - cursor.cycle);
+            if (prefix != 0) {
+                self.tickPeripherals(prefix, frame_ready);
+                cursor.cycle += prefix;
+                remaining -= prefix;
+            }
+            self.applyCycleInputsAtCurrent(cursor);
+        }
+
+        if (remaining != 0) {
+            self.tickPeripherals(remaining, frame_ready);
+            cursor.cycle += remaining;
+        }
+    }
+
     fn tickPeripherals(self: *Machine, cycles: u8, frame_ready: *bool) void {
         if (cycles == 0) return;
 
@@ -352,8 +661,30 @@ pub const Machine = struct {
         self.bus.cartridge.mbc.tick(cycles);
     }
 
-    fn captureBusState(self: *const Machine) BusState {
-        var state = BusState{
+    fn captureCoreState(self: *const Machine) CoreSnapshot {
+        return .{
+            .cpu = .{
+                .af = self.cpu.af,
+                .bc = self.cpu.bc,
+                .de = self.cpu.de,
+                .hl = self.cpu.hl,
+                .sp = self.cpu.sp,
+                .pc = self.cpu.pc,
+                .ime = self.cpu.ime,
+                .ime_enable_delay = self.cpu.ime_enable_delay,
+                .halted = self.cpu.halted,
+                .halt_bug = self.cpu.halt_bug,
+                .cycles = self.cpu.cycles,
+            },
+            .bus = self.captureCoreBusState(),
+            .ppu = self.ppu,
+            .steps = self.steps,
+            .frames = self.frames,
+        };
+    }
+
+    fn captureCoreBusState(self: *const Machine) CoreBusState {
+        return .{
             .wram = self.bus.wram,
             .hram = self.bus.hram,
             .oam = self.bus.oam,
@@ -378,18 +709,70 @@ pub const Machine = struct {
             .apu = self.bus.apu,
             .dma = self.bus.dma,
             .mbc = self.bus.cartridge.mbc.snapshot(),
-            .cart_ram_len = 0,
-            .cart_ram = [_]u8{0} ** MAX_CART_RAM_BYTES,
         };
-
-        if (self.bus.cartridge.ram_data) |ram| {
-            state.cart_ram_len = @min(ram.len, MAX_CART_RAM_BYTES);
-            @memcpy(state.cart_ram[0..state.cart_ram_len], ram[0..state.cart_ram_len]);
-        }
-        return state;
     }
 
-    fn applyBusState(self: *Machine, state: BusState) void {
+    /// Copy mutable hardware directly into a freshly initialized branch. This
+    /// avoids materializing the legacy fixed-capacity snapshot, whose 128 KiB
+    /// cartridge-RAM reserve dominated fork cost even for ROM-only games.
+    fn copyHardwareStateTo(self: *const Machine, branch: *Machine) void {
+        branch.cpu = self.cpu;
+        branch.cpu.reader_ctx = undefined;
+
+        branch.bus.wram = self.bus.wram;
+        branch.bus.hram = self.bus.hram;
+        branch.bus.oam = self.bus.oam;
+        branch.bus.vram = self.bus.vram;
+
+        branch.bus.io.data = self.bus.io.data;
+        branch.bus.io.joypad_select = self.bus.io.joypad_select;
+        branch.bus.io.joypad_buttons = self.bus.io.joypad_buttons;
+        branch.bus.io.oam_scan_row = self.bus.io.oam_scan_row;
+        branch.bus.io.ppu_oam_read_blocked = self.bus.io.ppu_oam_read_blocked;
+        branch.bus.io.ppu_oam_write_blocked = self.bus.io.ppu_oam_write_blocked;
+        branch.bus.io.ppu_vram_read_blocked = self.bus.io.ppu_vram_read_blocked;
+        branch.bus.io.ppu_vram_write_blocked = self.bus.io.ppu_vram_write_blocked;
+        branch.bus.io.stat_irq_line = self.bus.io.stat_irq_line;
+        branch.bus.io.stat_mode0_suppressed = self.bus.io.stat_mode0_suppressed;
+        branch.bus.io.stat_read_early_hblank = self.bus.io.stat_read_early_hblank;
+        branch.bus.io.late_interrupts = self.bus.io.late_interrupts;
+
+        branch.bus.ie_register = self.bus.ie_register;
+        branch.bus.timer = self.bus.timer;
+        branch.bus.serial = self.bus.serial;
+        branch.bus.apu = self.bus.apu;
+        branch.bus.apu.discardSamples();
+        branch.bus.dma = self.bus.dma;
+        branch.bus.cartridge.mbc.restore(self.bus.cartridge.mbc.snapshot());
+
+        branch.ppu = self.ppu;
+        branch.steps = self.steps;
+        branch.frames = self.frames;
+    }
+
+    fn applyCoreState(self: *Machine, state: CoreSnapshot) void {
+        self.cpu.af = state.cpu.af;
+        self.cpu.bc = state.cpu.bc;
+        self.cpu.de = state.cpu.de;
+        self.cpu.hl = state.cpu.hl;
+        self.cpu.sp = state.cpu.sp;
+        self.cpu.pc = state.cpu.pc;
+        self.cpu.ime = state.cpu.ime;
+        self.cpu.ime_enable_delay = state.cpu.ime_enable_delay;
+        self.cpu.halted = state.cpu.halted;
+        self.cpu.halt_bug = state.cpu.halt_bug;
+        self.cpu.cycles = state.cpu.cycles;
+        self.cpu.reader_ctx = undefined;
+
+        self.applyCoreBusState(state.bus);
+        const capture_pixels = self.ppu.isPixelCaptureEnabled();
+        self.ppu = state.ppu;
+        self.ppu.setPixelCapture(capture_pixels);
+        self.steps = state.steps;
+        self.frames = state.frames;
+    }
+
+    fn applyCoreBusState(self: *Machine, state: CoreBusState) void {
         self.bus.wram = state.wram;
         self.bus.hram = state.hram;
         self.bus.oam = state.oam;
@@ -416,12 +799,6 @@ pub const Machine = struct {
         self.bus.apu.discardSamples();
         self.bus.dma = state.dma;
         self.bus.cartridge.mbc.restore(state.mbc);
-
-        if (self.bus.cartridge.ram_data) |ram| {
-            const len = @min(@min(ram.len, MAX_CART_RAM_BYTES), state.cart_ram_len);
-            if (len > 0) @memcpy(ram[0..len], state.cart_ram[0..len]);
-            if (ram.len > len) @memset(ram[len..], 0);
-        }
     }
 };
 
@@ -461,7 +838,7 @@ test "machine snapshot restores mutable hardware and mapper state" {
 
     try std.testing.expectEqual(@as(u16, 0x1234), machine.cpu.pc);
     try std.testing.expectEqual(@as(u8, 0xA5), machine.bus.wram[7]);
-    try std.testing.expectEqual(state.bus.mbc.rom_bank, machine.bus.cartridge.mbc.snapshot().rom_bank);
+    try std.testing.expectEqual(state.core.bus.mbc.rom_bank, machine.bus.cartridge.mbc.snapshot().rom_bank);
 }
 
 test "machine button API uses the DMG active-low layout" {
@@ -494,4 +871,132 @@ test "machine forks share ROM and isolate mutable state" {
     branch.bus.wram[0] = 0x99;
     try std.testing.expectEqual(@as(u8, 0x42), parent.bus.wram[0]);
     try std.testing.expect(parent.observableDigest() != branch.observableDigest());
+}
+
+test "frame stepping can omit pixels without omitting hardware frames" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    @memset(&machine.ppu.frame_buffer, [_]ppu_mod.DmgColor{.Black} ** ppu_mod.SCREEN_WIDTH);
+    const timing_only = machine.stepFrames(1, .{
+        .video = .none,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!timing_only.timed_out);
+    try std.testing.expectEqual(@as(usize, 1), timing_only.frames_completed);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        std.mem.asBytes(&machine.ppu.frame_buffer),
+        @intFromEnum(ppu_mod.DmgColor.Black),
+    ));
+
+    const observed = machine.stepFrames(1, .{
+        .video = .final_frame,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!observed.timed_out);
+    try std.testing.expectEqual(@as(usize, 1), observed.frames_completed);
+    try std.testing.expect(!std.mem.allEqual(
+        u8,
+        std.mem.asBytes(&machine.ppu.frame_buffer),
+        @intFromEnum(ppu_mod.DmgColor.Black),
+    ));
+}
+
+test "frame input timelines apply at deterministic boundaries" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    const inputs = [_]FrameInput{
+        .{ .frame_offset = 0, .buttons = .{ .a = true } },
+        .{ .frame_offset = 1, .buttons = .{ .right = true, .start = true } },
+    };
+    const result = try machine.stepFramesWithInputs(2, &inputs, .{
+        .video = .none,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(@as(u8, 0x7E), machine.bus.io.getJoypadState());
+
+    const observation = machine.observe();
+    try std.testing.expectEqual(machine.frames, observation.frames);
+    try std.testing.expectEqual(machine.cpu.pc, observation.cpu.pc);
+    try std.testing.expectEqual(@as(usize, 0x400), observation.background_tilemap.len);
+}
+
+test "cycle input timelines split instruction clocks at exact T-cycles" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    const inputs = [_]CycleInput{
+        .{ .cycle = 2, .buttons = .{ .a = true } },
+        .{ .cycle = 6, .buttons = .{ .start = true } },
+    };
+    const result = try machine.runUntilCycle(7, &inputs);
+    try std.testing.expectEqual(@as(u64, 7), result.requested_cycle);
+    try std.testing.expectEqual(@as(u64, 8), result.reached_cycle);
+    try std.testing.expectEqual(@as(usize, 2), result.instructions);
+    try std.testing.expectEqual(@as(u8, 0x7F), machine.bus.io.getJoypadState());
+}
+
+test "deterministic reset clears episode RAM and reseeds MBC3 time" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").rtcCartridge(std.testing.allocator),
+        .{ .rtc_seed = .{ .seconds = 12, .day = 4 } },
+    );
+    defer machine.deinit();
+
+    try std.testing.expectEqual(@as(u8, 12), machine.inspectCartridge().mapper.rtc.seconds);
+    machine.bus.cartridge.ram_data.?[3] = 0xCC;
+    machine.bus.cartridge.mbc.seedRtc(.{ .seconds = 59, .day = 8 });
+
+    machine.resetDeterministic(.{
+        .rtc_seed = .{ .minutes = 7, .day = 42, .cycle_accumulator = 99 },
+        .buttons = .{ .b = true },
+    });
+    const inspection = machine.inspectCartridge();
+    try std.testing.expectEqual(@as(u8, 0), machine.bus.cartridge.ram_data.?[3]);
+    try std.testing.expectEqual(@as(u8, 0), inspection.mapper.rtc.seconds);
+    try std.testing.expectEqual(@as(u8, 7), inspection.mapper.rtc.minutes);
+    try std.testing.expectEqual(@as(u9, 42), inspection.mapper.rtc.day);
+    try std.testing.expectEqual(@as(u32, 99), inspection.mapper.rtc.cycle_accumulator);
+    try std.testing.expectEqual(@as(u8, 0xDF), machine.bus.io.getJoypadState());
+}
+
+test "owned snapshots store only the cartridge RAM in use" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").rtcCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+    machine.cpu.pc = 0x4567;
+    machine.bus.wram[9] = 0xAB;
+    machine.bus.cartridge.ram_data.?[17] = 0xCD;
+
+    var state = try machine.captureOwned(std.testing.allocator);
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 0x2000), state.cartridge_ram.len);
+    try std.testing.expect(state.byteSize() < @sizeOf(Snapshot));
+
+    machine.cpu.pc = 0;
+    machine.bus.wram[9] = 0;
+    machine.bus.cartridge.ram_data.?[17] = 0;
+    try machine.restoreOwned(&state);
+    try std.testing.expectEqual(@as(u16, 0x4567), machine.cpu.pc);
+    try std.testing.expectEqual(@as(u8, 0xAB), machine.bus.wram[9]);
+    try std.testing.expectEqual(@as(u8, 0xCD), machine.bus.cartridge.ram_data.?[17]);
 }

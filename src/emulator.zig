@@ -7,6 +7,7 @@ const Snapshot = machine_mod.Snapshot;
 pub const MooneyeResult = machine_mod.MooneyeResult;
 const frontend_mod = @import("frontend/sdl_frontend.zig");
 const SdlFrontend = frontend_mod.SdlFrontend;
+const Debugger = @import("debugger.zig").Debugger;
 
 pub const EmulatorOptions = struct {
     debug: bool = false,
@@ -35,6 +36,9 @@ pub const Emulator = struct {
     save_slots: [SAVE_SLOT_COUNT]?Snapshot = [_]?Snapshot{null} ** SAVE_SLOT_COUNT,
     last_ui_redraw_ns: i96 = 0,
     next_frame_deadline_ns: i96 = 0,
+    fps_window_start_ns: i96 = 0,
+    fps_window_frames: u32 = 0,
+    fps_x100: u32 = 0,
 
     pub fn init(allocator: Allocator, io: std.Io, rom_path: []const u8, options: EmulatorOptions) !Emulator {
         var cartridge = try Cartridge.load(allocator, io, rom_path);
@@ -78,6 +82,7 @@ pub const Emulator = struct {
         }
 
         self.last_ui_redraw_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
+        self.fps_window_start_ns = self.last_ui_redraw_ns;
         self.next_frame_deadline_ns = 0;
         if (self.status_message_len == 0) self.setStatusMessage("READY");
 
@@ -88,6 +93,7 @@ pub const Emulator = struct {
         }
 
         self.syncUiStatus();
+        self.syncInspector();
 
         while (self.running) {
             // Polling SDL for every instruction is unnecessarily expensive.
@@ -102,7 +108,7 @@ pub const Emulator = struct {
                 self.handleUiActions(actions);
                 self.syncUiStatus();
                 if (actions.redraw) {
-                    if (self.frontend) |*frontend| frontend.present(&self.machine.ppu.frame_buffer);
+                    self.redrawFrontend();
                 }
                 self.maybeRedrawUi();
             }
@@ -166,6 +172,8 @@ pub const Emulator = struct {
 
         if (result.frame_ready) {
             if (self.frontend) |*frontend| {
+                self.recordPresentedFrame();
+                self.syncInspector();
                 frontend.present(&self.machine.ppu.frame_buffer);
                 self.paceFrame();
             }
@@ -194,6 +202,7 @@ pub const Emulator = struct {
         const frontend = if (self.frontend) |*active| active else return;
         const now = std.Io.Clock.awake.now(self.io).nanoseconds;
         if (now - self.last_ui_redraw_ns >= 16 * std.time.ns_per_ms) {
+            self.syncInspector();
             frontend.redraw(&self.machine.ppu.frame_buffer);
             self.last_ui_redraw_ns = now;
         }
@@ -236,6 +245,7 @@ pub const Emulator = struct {
             self.paused = !self.paused;
             self.setStatusMessage(if (self.paused) "PAUSED" else "RUNNING");
         }
+        if (actions.step_instruction and self.paused) self.stepPausedInstruction();
         if (actions.toggle_mute) {
             if (self.frontend) |*frontend| {
                 const muted = frontend.toggleAudioMute();
@@ -262,6 +272,55 @@ pub const Emulator = struct {
         );
     }
 
+    fn syncInspector(self: *Emulator) void {
+        const frontend = if (self.frontend) |*active| active else return;
+        const cpu = &self.machine.cpu;
+        const mapper = self.machine.inspectCartridge().mapper;
+        frontend.setInspector(.{
+            .pc = cpu.pc,
+            .sp = cpu.sp,
+            .af = cpu.af,
+            .bc = cpu.bc,
+            .de = cpu.de,
+            .hl = cpu.hl,
+            .cycles = cpu.cycles,
+            .frames = self.machine.frames,
+            .upper_rom_bank = mapper.upper_rom_bank,
+            .effective_ram_bank = mapper.effective_ram_bank,
+            .fps_x100 = self.fps_x100,
+            .mnemonic = Debugger.disassembleAt(&self.machine, cpu.pc).mnemonic,
+        });
+    }
+
+    fn redrawFrontend(self: *Emulator) void {
+        self.syncInspector();
+        if (self.frontend) |*frontend| frontend.present(&self.machine.ppu.frame_buffer);
+    }
+
+    fn stepPausedInstruction(self: *Emulator) void {
+        _ = self.machine.step();
+        self.setStatusMessage("STEP");
+        self.redrawFrontend();
+    }
+
+    fn recordPresentedFrame(self: *Emulator) void {
+        const now = std.Io.Clock.awake.now(self.io).nanoseconds;
+        if (self.fps_window_start_ns == 0) {
+            self.fps_window_start_ns = now;
+            self.fps_window_frames = 0;
+            return;
+        }
+        self.fps_window_frames += 1;
+        const elapsed = now - self.fps_window_start_ns;
+        if (elapsed < 500 * std.time.ns_per_ms) return;
+        self.fps_x100 = @intCast(@divTrunc(
+            @as(i128, self.fps_window_frames) * 100 * std.time.ns_per_s,
+            elapsed,
+        ));
+        self.fps_window_frames = 0;
+        self.fps_window_start_ns = now;
+    }
+
     fn setStatusMessage(self: *Emulator, message: []const u8) void {
         self.status_message_len = @min(message.len, self.status_message.len);
         for (message[0..self.status_message_len], 0..) |byte, index| {
@@ -284,6 +343,7 @@ pub const Emulator = struct {
         self.machine.restore(state);
         if (self.frontend) |*frontend| {
             frontend.clearAudioQueue();
+            self.syncInspector();
             frontend.redraw(&self.machine.ppu.frame_buffer);
         }
         self.paused = false;
@@ -300,6 +360,9 @@ pub const Emulator = struct {
         self.machine.reset();
         if (self.frontend) |*frontend| frontend.clearAudioQueue();
         self.next_frame_deadline_ns = 0;
+        self.fps_window_start_ns = 0;
+        self.fps_window_frames = 0;
+        self.fps_x100 = 0;
         self.paused = false;
         self.running = false;
     }

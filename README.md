@@ -21,6 +21,8 @@ Implemented core pieces:
 - SDL2 window output (with automatic headless fallback if SDL init fails)
 - Joypad input mapping + joypad interrupt signaling
 - Resizable, high-DPI frontend with frame pacing, palette themes, and fullscreen
+- Live research inspector with CPU state, decoded instruction, mapper banks,
+  emulated time, host FPS, and paused single-instruction stepping
 - Emulator management hotkeys (pause, reset, save/load state, slot selection)
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
@@ -74,8 +76,9 @@ zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 `nibble-bench` measures the simulation core directly: it does not initialize
 SDL, pace frames, or mix host PCM samples. Every trial restores the same machine
 snapshot and verifies that it ends with the same observable-state digest. It
-also reports deterministic machine forks per second, current snapshot size, and
-aggregate multicore throughput through Zig 0.16's `std.Io.Group` concurrency.
+also reports owned snapshot capture/restore rates, deterministic machine forks
+per second, and aggregate multicore throughput through Zig 0.16's
+`std.Io.Group` concurrency.
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \
@@ -86,6 +89,12 @@ zig build bench -Doptimize=ReleaseFast -- \
 The report includes instruction and T-cycle throughput, real-time factor,
 completed frames per second, and the deterministic digest. Use the same ROM,
 step count, Zig version, and host when comparing changes.
+Pass `--no-video` to benchmark timing-only PPU execution without framebuffer
+stores; the report always prints the active observation policy.
+
+The [research runtime notes](docs/RESEARCH_RUNTIME.md) explain the intended
+planning/training niche, current measured performance, accuracy tradeoffs, and
+a substantive counterfactual-search demo direction.
 
 ## Embedding the core
 
@@ -96,18 +105,38 @@ the outputs the caller needs.
 
 Important automation operations include:
 
-- `step` and bounded `runUntilFrame` execution;
-- `setButtons` with an explicit, host-independent input state;
-- `capture`, `restore`, and `fork` for deterministic branches and replay;
-- `MachineBatch` for parallel instruction or bounded-frame advancement;
+- `step`, bounded `runUntilFrame`, and allocation-free `stepFrames` execution;
+- per-run video policies for every frame, the final frame only, or timing-only
+  execution with no framebuffer stores;
+- `observe` for borrowed CPU, RAM, VRAM, OAM, tile-map, and framebuffer views;
+- `setButtons` and frame-boundary `FrameInput` timelines with explicit,
+  host-independent input state;
+- `runUntilCycle` and `CycleInput` for transitions on exact emulated T-cycles,
+  including transitions inside a CPU instruction;
+- deterministic power-on RTC seeds and `resetDeterministic` for reproducible
+  episodes that optionally clear battery-backed cartridge RAM;
+- allocation-free `capture`/`restore`, compact `captureOwned`/`restoreOwned`,
+  and `fork` for deterministic branches and replay;
+- `MachineBatch` for parallel instruction, bounded-frame, or multi-frame
+  observation-selective advancement, machine-ordered heterogeneous actions,
+  action repeat, and deterministic batch resets;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
 
+`Debugger` is an opt-in research wrapper around `Machine`: it provides fixed-
+capacity PC breakpoints, instruction-boundary value watchpoints, mapper-bank
+transition events, frame events, a bounded history ring, and non-intrusive
+disassembly. Because it drives `Machine.step` from the outside, normal headless
+execution contains no debugger callback or trace branch. This makes it useful
+for investigating cartridge behavior without taxing training runs.
+
 Forks retain one atomically reference-counted immutable ROM allocation while
-owning independent hardware and cartridge-RAM state. Snapshots currently contain
-a fixed-capacity cartridge-RAM image; reducing that copy size remains follow-up
-work before very large in-memory search trees are practical.
+owning independent hardware and cartridge-RAM state. Forking copies hardware
+directly instead of materializing the fixed 128 KiB cartridge-RAM reserve.
+`OwnedSnapshot` similarly allocates only the cartridge RAM present in the
+loaded cartridge; the larger value `Snapshot` remains available for callers
+that require allocation-free capture and restore.
 
 CLI options:
 - `-h`, `--help`: show help
@@ -126,7 +155,9 @@ Controls (default):
 - Select: `Backspace` or `Tab`
 
 Management hotkeys (SDL mode):
+- `F1`: show/hide the live research inspector
 - `P`: pause/resume emulation
+- `F10`: execute one instruction while paused
 - `R`: reset emulator
 - `F5`: save state to active slot
 - `F9`: load state from active slot
@@ -135,6 +166,8 @@ Management hotkeys (SDL mode):
 - `M`: mute/unmute audio
 - `F11`: toggle fullscreen
 - `Esc`: quit
+- Inspector: shows run/pause state, next instruction, CPU registers, active ROM
+  and RAM banks, frame/dot counters, and measured presentation rate
 - Window title: shows run/pause state, palette, audio state, active slot, and
   the last status message
 

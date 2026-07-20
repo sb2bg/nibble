@@ -81,6 +81,7 @@ extern fn SDL_CreateRenderer(window: *Window, index: c_int, flags: u32) ?*Render
 extern fn SDL_DestroyRenderer(renderer: *Renderer) void;
 extern fn SDL_RenderSetLogicalSize(renderer: *Renderer, w: c_int, h: c_int) c_int;
 extern fn SDL_SetRenderDrawColor(renderer: *Renderer, r: u8, g: u8, b: u8, a: u8) c_int;
+extern fn SDL_RenderFillRect(renderer: *Renderer, rect: *const Rect) c_int;
 
 extern fn SDL_CreateTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, h: c_int) ?*Texture;
 extern fn SDL_DestroyTexture(texture: *Texture) void;
@@ -128,7 +129,9 @@ pub const SCANCODE_LEFTBRACKET: usize = 47;
 pub const SCANCODE_RIGHTBRACKET: usize = 48;
 pub const SCANCODE_F5: usize = 62;
 pub const SCANCODE_F9: usize = 66;
+pub const SCANCODE_F10: usize = 67;
 pub const SCANCODE_F11: usize = 68;
+pub const SCANCODE_F1: usize = 58;
 pub const SCANCODE_C: usize = 6;
 pub const SCANCODE_M: usize = 16;
 
@@ -188,6 +191,10 @@ pub fn setRenderDrawColor(renderer: *Renderer, red: u8, green: u8, blue: u8, alp
     if (SDL_SetRenderDrawColor(renderer, red, green, blue, alpha) < 0) {
         return error.SdlRenderColorFailed;
     }
+}
+
+pub fn fillRect(renderer: *Renderer, rect: *const Rect) !void {
+    if (SDL_RenderFillRect(renderer, rect) < 0) return error.SdlRenderFillFailed;
 }
 
 pub fn createTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, h: c_int) !*Texture {
