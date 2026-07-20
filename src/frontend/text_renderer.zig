@@ -127,19 +127,15 @@ pub const TextRenderer = struct {
                     .w = @intCast(glyph.x1 - glyph.x0),
                     .h = @intCast(glyph.y1 - glyph.y0),
                 };
-                const destination: sdl.Rect = .{
-                    .x = roundedInt(left),
-                    .y = roundedInt(baseline + glyph.y_offset * scale),
-                    .w = @max(1, roundedInt(width)),
-                    .h = @max(1, roundedInt(height)),
+                const destination: sdl.FRect = .{
+                    .x = left,
+                    .y = baseline + glyph.y_offset * scale,
+                    .w = width,
+                    .h = height,
                 };
-                sdl.renderCopy(renderer, self.texture, &source, &destination) catch return;
+                sdl.renderCopyF(renderer, self.texture, &source, &destination) catch return;
             }
             pen_x += glyph.x_advance * scale;
         }
     }
 };
-
-fn roundedInt(value: f32) c_int {
-    return @intFromFloat(@round(value));
-}

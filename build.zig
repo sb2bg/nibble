@@ -16,7 +16,7 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const clap = b.dependency("clap", .{});
     const stb = b.dependency("stb", .{});
-    const jetbrains_mono = b.dependency("jetbrains_mono", .{});
+    const inter = b.dependency("inter", .{});
 
     // Public frontend-free package module for embedding, automation, and
     // future C/Python bindings.
@@ -36,7 +36,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("clap", clap.module("clap"));
-    configureFrontend(b, exe.root_module, stb, jetbrains_mono, target);
+    configureFrontend(b, exe.root_module, stb, inter, target);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -47,8 +47,8 @@ pub fn build(b: *std.Build) void {
         "share/nibble/licenses/stb.txt",
     ).step);
     b.getInstallStep().dependOn(&b.addInstallFile(
-        jetbrains_mono.path("OFL.txt"),
-        "share/nibble/licenses/JetBrainsMono-OFL.txt",
+        inter.path("LICENSE.txt"),
+        "share/nibble/licenses/Inter-OFL.txt",
     ).step);
 
     // This *creates* a Run step in the build graph, to be executed when another
@@ -114,7 +114,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe_unit_tests.root_module.addImport("clap", clap.module("clap"));
-    configureFrontend(b, exe_unit_tests.root_module, stb, jetbrains_mono, target);
+    configureFrontend(b, exe_unit_tests.root_module, stb, inter, target);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
@@ -168,7 +168,7 @@ fn configureFrontend(
     b: *std.Build,
     module: *std.Build.Module,
     stb: *std.Build.Dependency,
-    jetbrains_mono: *std.Build.Dependency,
+    inter: *std.Build.Dependency,
     target: std.Build.ResolvedTarget,
 ) void {
     module.link_libc = true;
@@ -176,6 +176,6 @@ fn configureFrontend(
     module.addIncludePath(stb.path("."));
     module.addCSourceFile(.{ .file = b.path("src/frontend/stb_truetype_impl.c") });
     module.addAnonymousImport("debugger_font", .{
-        .root_source_file = jetbrains_mono.path("fonts/ttf/JetBrainsMono-Regular.ttf"),
+        .root_source_file = inter.path("docs/font-files/InterVariable.ttf"),
     });
 }

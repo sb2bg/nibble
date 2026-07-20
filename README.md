@@ -240,6 +240,6 @@ implemented.
 
 This project is for educational and development purposes. Use only ROMs you are legally allowed to run.
 
-The optional SDL debugger embeds JetBrains Mono under the SIL Open Font License
-and uses `stb_truetype` under its MIT/public-domain dual license. `zig build`
-installs their complete license texts under `share/nibble/licenses/`.
+The optional SDL debugger embeds Inter under the SIL Open Font License and uses
+`stb_truetype` under its MIT/public-domain dual license. `zig build` installs
+their complete license texts under `share/nibble/licenses/`.

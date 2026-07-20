@@ -14,6 +14,13 @@ pub const Rect = extern struct {
     h: c_int,
 };
 
+pub const FRect = extern struct {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+};
+
 pub const WindowEvent = extern struct {
     type: u32,
     timestamp: u32,
@@ -122,6 +129,7 @@ extern fn SDL_SetTextureColorMod(texture: *Texture, r: u8, g: u8, b: u8) c_int;
 extern fn SDL_SetTextureScaleMode(texture: *Texture, scale_mode: c_int) c_int;
 extern fn SDL_UpdateTexture(texture: *Texture, rect: ?*const anyopaque, pixels: [*]const u8, pitch: c_int) c_int;
 extern fn SDL_RenderCopy(renderer: *Renderer, texture: *Texture, srcrect: ?*const anyopaque, dstrect: ?*const anyopaque) c_int;
+extern fn SDL_RenderCopyF(renderer: *Renderer, texture: *Texture, srcrect: ?*const anyopaque, dstrect: ?*const FRect) c_int;
 extern fn SDL_RenderPresent(renderer: *Renderer) void;
 extern fn SDL_RenderClear(renderer: *Renderer) c_int;
 
@@ -292,6 +300,12 @@ pub fn updateTexture(texture: *Texture, rect: ?*const anyopaque, pixels: []const
 
 pub fn renderCopy(renderer: *Renderer, texture: *Texture, srcrect: ?*const anyopaque, dstrect: ?*const anyopaque) !void {
     if (SDL_RenderCopy(renderer, texture, srcrect, dstrect) < 0) {
+        return error.SdlRenderCopyFailed;
+    }
+}
+
+pub fn renderCopyF(renderer: *Renderer, texture: *Texture, srcrect: ?*const anyopaque, dstrect: *const FRect) !void {
+    if (SDL_RenderCopyF(renderer, texture, srcrect, dstrect) < 0) {
         return error.SdlRenderCopyFailed;
     }
 }
