@@ -218,10 +218,8 @@ pub const Cpu = struct {
     // =========================================================================
 
     pub fn push(self: *Cpu, val: u16, bus: *Bus) void {
-        const sp_before_hi = self.sp;
         self.sp -%= 1;
         bus.write(self.sp, @truncate(val >> 8));
-        bus.triggerOamBugWriteIdu(sp_before_hi);
 
         self.sp -%= 1;
         bus.write(self.sp, @truncate(val));
@@ -231,12 +229,13 @@ pub const Cpu = struct {
     /// stack writes. Keeping this outside `push` matters because interrupt
     /// dispatch has its own wait-state sequence.
     fn pushAfterInternalCycle(self: *Cpu, val: u16, bus: *Bus) void {
+        const sp_before_push = self.sp;
         bus.tickInternal(4);
+        bus.triggerOamBugWriteIdu(sp_before_push);
         self.push(val, bus);
     }
 
     pub fn pop(self: *Cpu, bus: *const Bus) u16 {
-        @constCast(bus).triggerOamBugReadIncDec(self.sp);
         const lo = bus.read(self.sp);
         self.sp +%= 1;
         const hi = bus.read(self.sp);
@@ -475,13 +474,11 @@ pub const Cpu = struct {
                 break :blk 8;
             },
             .ld_a_hli => blk: {
-                bus.triggerOamBugReadIncDec(self.hl);
                 self.setA(bus.read(self.hl));
                 self.hl +%= 1;
                 break :blk 8;
             },
             .ld_a_hld => blk: {
-                bus.triggerOamBugReadIncDec(self.hl);
                 self.setA(bus.read(self.hl));
                 self.hl -%= 1;
                 break :blk 8;

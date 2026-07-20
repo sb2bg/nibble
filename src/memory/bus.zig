@@ -154,18 +154,6 @@ pub const Bus = struct {
         self.applyOamWriteCorruption(nextOamScanRow(row));
     }
 
-    pub fn triggerOamBugWriteIduCurrentCycle(self: *Bus, addr: u16) void {
-        if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
-        self.applyOamWriteCorruption(self.io.getOamScanRow());
-    }
-
-    pub fn triggerOamBugReadIncDec(self: *Bus, addr: u16) void {
-        if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
-        const row = self.io.getOamScanRow();
-        if (row >= 19) return;
-        self.applyOamReadIncDecExtra(nextOamScanRow(row));
-    }
-
     inline fn tickAccess(self: *const Bus) void {
         if (self.cycle_hook) |hook| {
             hook.tickFn(hook.context, 4);
@@ -194,10 +182,6 @@ pub const Bus = struct {
 
     inline fn isOamAddress(addr: u16) bool {
         return addr >= 0xFE00 and addr <= 0xFEFF;
-    }
-
-    inline fn isOamMemoryAddress(addr: u16) bool {
-        return addr >= 0xFE00 and addr <= 0xFE9F;
     }
 
     inline fn nextOamScanRow(current: u8) u8 {
@@ -246,33 +230,68 @@ pub const Bus = struct {
         self.copyOamTailFromPrevRow(row);
     }
 
-    // Pattern for read-related corruption (reads in mode 2).
+    // OAM reads feed the scan row through several overlapping latches. Which
+    // older rows are overwritten depends on the low five bits of the PPU's
+    // byte-row address, so reducing this to the normal b | (a & c) formula
+    // misses the distinctive POP and HL+/- corruption patterns.
     fn applyOamReadCorruption(self: *Bus, row: u8) void {
         if (row == 0 or row >= 20) return;
 
-        const a = self.getOamWord(row, 0);
-        const b = self.getOamWord(row - 1, 0);
-        const c = self.getOamWord(row - 1, 2);
+        const byte_row = row * 8;
+        switch (byte_row & 0x18) {
+            0x10 => {
+                // Secondary corruption also copies the preceding row two
+                // rows back before the normal final row copy below.
+                if (row < 19) {
+                    const a = self.getOamWord(row - 2, 0);
+                    const b = self.getOamWord(row - 1, 0);
+                    const c = self.getOamWord(row, 0);
+                    const d = self.getOamWord(row - 1, 2);
+                    self.setOamWord(row - 1, 0, (b & (a | c | d)) | (a & c & d));
+                    self.copyOamRow(row - 2, row - 1);
+                }
+            },
+            0x00 => {
+                // These rows reach four rows back. The 0x40 byte row has an
+                // additional DMG-specific latch equation; 0x20 and 0x60 use
+                // their measured tertiary variants.
+                if (row >= 4 and row < 19) {
+                    const a = self.getOamWord(row, 0);
+                    const b = self.getOamWord(row - 1, 2);
+                    const c = self.getOamWord(row - 1, 0);
+                    const d = self.getOamWord(row - 2, 0);
+                    const e = self.getOamWord(row - 4, 0);
+                    const merged = if (byte_row == 0x40) blk: {
+                        const f = self.getOamWord(row - 2, 1);
+                        const g = self.getOamWord(row - 2, 0);
+                        const h = self.getOamWord(row - 4, 0);
+                        break :blk (e & (h | g | (~d & f) | c | b)) | (c & g & h);
+                    } else if (byte_row == 0x20)
+                        (c & (a | b | d | e)) | (a & b & d & e)
+                    else if (byte_row == 0x60)
+                        (c & (a | b | d | e)) | (b & d & e)
+                    else
+                        c | (a & b & d & e);
 
-        self.setOamWord(row, 0, b | (a & c));
-        self.copyOamTailFromPrevRow(row);
-    }
-
-    // Extra transformation used when read coincides with IDU increment/decrement
-    // (for example LD A,(HL+) / LD A,(HL-)).
-    fn applyOamReadIncDecExtra(self: *Bus, row: u8) void {
-        if (row < 4 or row >= 19) return;
-
-        const a = self.getOamWord(row - 2, 0);
-        const b = self.getOamWord(row - 1, 0);
-        const c = self.getOamWord(row, 0);
-        const d = self.getOamWord(row - 1, 2);
-
-        const merged = (b & (a | c | d)) | (a & c & d);
-        self.setOamWord(row - 1, 0, merged);
+                    self.setOamWord(row - 1, 0, merged);
+                    self.copyOamRow(row - 2, row - 1);
+                    self.copyOamRow(row - 4, row - 1);
+                }
+            },
+            else => {
+                const a = self.getOamWord(row, 0);
+                const b = self.getOamWord(row - 1, 0);
+                const c = self.getOamWord(row - 1, 2);
+                const merged = b | (a & c);
+                self.setOamWord(row - 1, 0, merged);
+                self.setOamWord(row, 0, merged);
+            },
+        }
 
         self.copyOamRow(row, row - 1);
-        self.copyOamRow(row - 2, row - 1);
+        // On the tested DMG revision, byte row 0x80 is also fed back into the
+        // first OAM row.
+        if (byte_row == 0x80) self.copyOamRow(0, row);
     }
 
     /// Get serial output for test ROMs
@@ -323,7 +342,13 @@ pub const Bus = struct {
         if (isOamAddress(addr) and self.isPpuOamReadBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
-                @constCast(self).applyOamReadCorruption(self.io.getOamScanRow());
+                const row = self.io.getOamScanRow();
+                if (row < 19) {
+                    // The PPU row counter names the M-cycle that just
+                    // completed; the OAM latch exposed to the CPU is the next
+                    // eight-byte row.
+                    @constCast(self).applyOamReadCorruption(nextOamScanRow(row));
+                }
             }
             return 0xFF;
         }
@@ -379,10 +404,11 @@ pub const Bus = struct {
             return;
         }
 
-        if (isOamMemoryAddress(addr) and self.isPpuOamWriteBlocked()) {
+        if (isOamAddress(addr) and self.isPpuOamWriteBlocked()) {
             if (self.isPpuInMode2()) {
                 // Accessing OAM while mode 2 is active triggers DMG corruption.
-                self.applyOamWriteCorruption(self.io.getOamScanRow());
+                const row = self.io.getOamScanRow();
+                if (row < 19) self.applyOamWriteCorruption(nextOamScanRow(row));
             }
             return;
         }
@@ -587,4 +613,45 @@ test "CPU VRAM access is blocked during pixel transfer" {
 
     bus.io.setPpuMode(0);
     try std.testing.expectEqual(@as(u8, 0x12), bus.read(0x8000));
+}
+
+test "consecutive DMG OAM reads reproduce the POP row-latch pattern" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    for (&bus.oam, 0..) |*byte, index| byte.* = @intCast(index);
+
+    // POP performs two reads on consecutive M-cycles. At this phase those
+    // reads expose byte rows 0x30 and 0x38 to the CPU.
+    bus.applyOamReadCorruption(6);
+    bus.applyOamReadCorruption(7);
+
+    const latched_row = [_]u8{ 0x30, 0x31, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
+    for (4..8) |row| {
+        try std.testing.expectEqualSlices(u8, &latched_row, bus.oam[row * 8 ..][0..8]);
+    }
+}
+
+test "consecutive DMG OAM writes propagate the PUSH row-latch pattern" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+
+    for (&bus.oam, 0..) |*byte, index| byte.* = @intCast(index);
+
+    // PUSH exposes SP during its internal cycle, followed by both stack-write
+    // addresses. Each M-cycle advances the same latched row one step.
+    bus.applyOamWriteCorruption(6);
+    bus.applyOamWriteCorruption(7);
+    bus.applyOamWriteCorruption(8);
+
+    const latched_row = [_]u8{ 0x30, 0x31, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
+    for (6..9) |row| {
+        try std.testing.expectEqualSlices(u8, &latched_row, bus.oam[row * 8 ..][0..8]);
+    }
 }
