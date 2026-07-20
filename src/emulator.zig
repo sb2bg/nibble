@@ -7,6 +7,7 @@ const Dma = bus_mod.Dma;
 const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 const Timer = @import("timer.zig").Timer;
 const Serial = @import("serial.zig").Serial;
+const Apu = @import("apu.zig").Apu;
 const Mbc = @import("memory/mbc.zig").Mbc;
 const ppu_mod = @import("ppu/ppu.zig");
 const Ppu = ppu_mod.Ppu;
@@ -67,6 +68,7 @@ const BusState = struct {
     ie_register: u8,
     timer: Timer,
     serial: Serial,
+    apu: Apu,
     dma: Dma,
     mbc: Mbc.Snapshot,
     cart_ram_len: usize,
@@ -293,7 +295,12 @@ pub const Emulator = struct {
             }
         }
 
+        const divider_start = self.bus.timer.system_counter;
         self.bus.tickTimer(cycles);
+        self.bus.tickApu(cycles, divider_start);
+        // Until the host audio adapter consumes these frames, discard them so
+        // the fixed-size handoff buffer never changes emulation behavior.
+        self.bus.apu.discardSamples();
         self.bus.tickSerial(cycles);
         self.bus.tickDma(cycles);
         self.bus.cartridge.mbc.tick(cycles);
@@ -469,6 +476,7 @@ pub const Emulator = struct {
             .ie_register = self.bus.ie_register,
             .timer = self.bus.timer,
             .serial = self.bus.serial,
+            .apu = self.bus.apu,
             .dma = self.bus.dma,
             .mbc = self.bus.cartridge.mbc.snapshot(),
             .cart_ram_len = 0,
@@ -505,6 +513,8 @@ pub const Emulator = struct {
         self.bus.ie_register = state.ie_register;
         self.bus.timer = state.timer;
         self.bus.serial = state.serial;
+        self.bus.apu = state.apu;
+        self.bus.apu.discardSamples();
         self.bus.dma = state.dma;
 
         self.bus.cartridge.mbc.restore(state.mbc);

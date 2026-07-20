@@ -145,7 +145,6 @@ pub const IoRegisters = struct {
         io.data[@intFromEnum(IoReg.STAT)] = 0x81; // Mode 1 (VBlank) with bit 7 set
         io.data[@intFromEnum(IoReg.LY)] = 0x91; // Post-boot LY value (in VBlank)
         io.data[@intFromEnum(IoReg.BGP)] = 0xFC;
-        io.data[@intFromEnum(IoReg.NR52)] = 0xF1;
 
         return io;
     }
@@ -173,12 +172,6 @@ pub const IoRegisters = struct {
                 break :blk if (self.stat_read_early_hblank) stat & 0xFC else stat;
             },
             .IF => self.data[addr] | 0xE0, // Upper 3 bits always set
-            .NR10 => self.data[addr] | 0x80,
-            .NR30 => self.data[addr] | 0x7F,
-            .NR32 => self.data[addr] | 0x9F,
-            .NR41 => self.data[addr] | 0xC0,
-            .NR44 => self.data[addr] | 0x3F,
-            .NR52 => self.data[addr] | 0x70,
             else => self.data[addr],
         };
     }
@@ -239,16 +232,6 @@ pub const IoRegisters = struct {
             .IF => {
                 self.data[addr] = val | 0xE0;
                 self.late_interrupts &= val;
-            },
-            .NR52 => {
-                // Only bit 7 is writable (sound on/off)
-                if (val & 0x80 == 0) {
-                    // Sound off - clear all sound registers
-                    for (0x10..0x26) |i| {
-                        self.data[i] = 0;
-                    }
-                }
-                self.data[addr] = (self.data[addr] & 0x0F) | (val & 0x80);
             },
             else => {
                 self.data[addr] = val;

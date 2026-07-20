@@ -4,6 +4,7 @@ const IoReg = @import("io.zig").IoReg;
 const Cartridge = @import("../cartridge/cartridge.zig").Cartridge;
 const Timer = @import("../timer.zig").Timer;
 const Serial = @import("../serial.zig").Serial;
+const Apu = @import("../apu.zig").Apu;
 
 /// OAM DMA progresses one byte per M-cycle. On DMG, the CPU can only reach
 /// HRAM while a transfer is active; DMA's own source reads bypass that lockout.
@@ -42,6 +43,7 @@ pub const Bus = struct {
     ie_register: u8, // Interrupt Enable (0xFFFF)
     timer: Timer,
     serial: Serial,
+    apu: Apu,
     dma: Dma,
 
     // Cartridge (owns ROM + RAM + MBC)
@@ -60,6 +62,7 @@ pub const Bus = struct {
             .ie_register = 0,
             .timer = Timer.init(),
             .serial = .{},
+            .apu = Apu.init(),
             .dma = .{},
             .cartridge = cartridge,
             .cycle_hook = null,
@@ -81,6 +84,7 @@ pub const Bus = struct {
         self.ie_register = 0;
         self.timer.reset(&self.io);
         self.serial.reset();
+        self.apu.reset();
         self.dma = .{};
         self.cartridge.mbc.reset();
     }
@@ -98,6 +102,10 @@ pub const Bus = struct {
 
     pub fn tickTimer(self: *Bus, cycles: u8) void {
         self.timer.tick(cycles, &self.io);
+    }
+
+    pub fn tickApu(self: *Bus, cycles: u8, divider_start: u16) void {
+        self.apu.tick(cycles, divider_start);
     }
 
     pub fn tickDma(self: *Bus, cycles: u8) void {
@@ -376,7 +384,13 @@ pub const Bus = struct {
             0xFEA0...0xFEFF => 0xFF,
 
             // I/O Registers
-            0xFF00...0xFF7F => self.io.read(@truncate(addr - 0xFF00)),
+            0xFF00...0xFF7F => blk: {
+                const io_addr: u8 = @truncate(addr - 0xFF00);
+                break :blk if (Apu.isRegister(io_addr))
+                    self.apu.read(io_addr)
+                else
+                    self.io.read(io_addr);
+            },
 
             // High RAM
             0xFF80...0xFFFE => self.hram[addr - 0xFF80],
@@ -438,9 +452,14 @@ pub const Bus = struct {
             // I/O Registers
             0xFF00...0xFF7F => {
                 const io_addr: u8 = @truncate(addr - 0xFF00);
-                if (io_addr == @intFromEnum(IoReg.SC)) {
+                if (Apu.isRegister(io_addr)) {
+                    self.apu.write(io_addr, val);
+                } else if (io_addr == @intFromEnum(IoReg.SC)) {
                     self.serial.writeControl(&self.io, val);
                 } else if (Timer.isRegister(io_addr)) {
+                    if (io_addr == @intFromEnum(IoReg.DIV)) {
+                        self.apu.dividerReset(self.timer.system_counter);
+                    }
                     self.timer.writeRegister(&self.io, io_addr, val);
                 } else {
                     self.io.write(io_addr, val);
