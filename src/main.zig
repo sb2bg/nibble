@@ -74,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
     defer emu.deinit();
 
     emu.run();
+    emu.printSerialOutput();
     emu.printCartRamTestOutput();
 
     if (parsed.mooneye_test) {

@@ -317,9 +317,6 @@ pub const IoRegisters = struct {
 
     pub fn captureSerialOutput(self: *IoRegisters, byte: u8) void {
         self.serial_output.append(self.allocator, byte) catch {};
-        if (byte >= 0x20 and byte < 0x7F or byte == '\n' or byte == '\r') {
-            std.debug.print("{c}", .{byte});
-        }
     }
 
     // PPU register helpers
