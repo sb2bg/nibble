@@ -44,7 +44,7 @@ const help_text =
 
 pub fn main(init: std.process.Init) !void {
     const argv = try init.minimal.args.toSlice(init.arena.allocator());
-    const parsed = cli.parse(argv[1..]) catch |err| {
+    const parsed = cli.parse(init.gpa, argv[1..]) catch |err| {
         std.process.fatal("invalid arguments ({s}); try 'nibble --help'", .{@errorName(err)});
     };
 
