@@ -635,16 +635,16 @@ pub const Cpu = struct {
             },
             .inc_rr => |reg| blk: {
                 const old = self.readReg16(reg);
-                bus.triggerOamBugWriteIdu(old);
                 // 2 M-cycles total: opcode fetch already consumed 1 M-cycle.
                 bus.tickInternal(4);
+                bus.triggerOamBugWriteIdu(old);
                 self.writeReg16(reg, old +% 1);
                 break :blk 8;
             },
             .dec_rr => |reg| blk: {
                 const old = self.readReg16(reg);
-                bus.triggerOamBugWriteIdu(old);
                 bus.tickInternal(4);
+                bus.triggerOamBugWriteIdu(old);
                 self.writeReg16(reg, old -% 1);
                 break :blk 8;
             },
