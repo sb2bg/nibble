@@ -53,18 +53,22 @@ never host wall time, and deterministic episode resets may clear external RAM.
 Similarly, a non-intrusive `peek` does not consume a bus cycle or cause CPU-only
 DMA/PPU arbitration side effects.
 
-`Machine.Snapshot` captures component-owned state, while immutable ROM data and
-owned allocations remain in place. Any newly persistent hardware field should
-be added to its component snapshot at the same time it is introduced. Snapshot
-restore clears host output queues because queued serial text and PCM are effects,
-not hardware state. The observable-state digest is a replay/regression identity,
-not a serialized save-state format or cryptographic hash.
+`Machine.Snapshot` captures component-owned state without allocation, while
+immutable ROM data and owned allocations remain in place. Its fixed cartridge
+RAM capacity is useful for save slots but wasteful in large search trees, so
+`OwnedSnapshot` stores only the loaded cartridge's actual RAM. Any newly
+persistent hardware field should be added to the shared core snapshot at the
+same time it is introduced. Snapshot restore clears host output queues because
+queued serial text and PCM are effects, not hardware state. The observable-state
+digest is a replay/regression identity, not a serialized save-state format or
+cryptographic hash.
 
-`Machine.fork` constructs an independent mutable machine from a snapshot while
-retaining the cartridge's immutable ROM allocation through an atomic reference
-count. Each branch owns its IO allocations, external cartridge RAM, mapper, and
-peripheral state, so branches may be scheduled on different workers after they
-are created.
+`Machine.fork` constructs an independent mutable machine while retaining the
+cartridge's immutable ROM allocation through an atomic reference count. It
+copies hardware directly into the branch instead of materializing a fixed-size
+snapshot. Each branch owns its IO allocations, external cartridge RAM, mapper,
+and peripheral state, so branches may be scheduled on different workers after
+they are created.
 
 `MachineBatch` partitions independent machines into at most one chunk per host
 CPU and schedules those chunks with Zig 0.16's `std.Io.Group.concurrent`. The

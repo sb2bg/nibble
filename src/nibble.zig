@@ -15,6 +15,7 @@ pub const CpuObservation = @import("machine.zig").CpuObservation;
 pub const Observation = @import("machine.zig").Observation;
 pub const Buttons = @import("machine.zig").Buttons;
 pub const Snapshot = @import("machine.zig").Snapshot;
+pub const OwnedSnapshot = @import("machine.zig").OwnedSnapshot;
 pub const MooneyeResult = @import("machine.zig").MooneyeResult;
 pub const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 pub const RomHeader = @import("cartridge/cartridge.zig").RomHeader;

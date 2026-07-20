@@ -162,7 +162,7 @@ const IoState = struct {
     late_interrupts: u8,
 };
 
-const BusState = struct {
+const CoreBusState = struct {
     wram: [0x2000]u8,
     hram: [0x7F]u8,
     oam: [0xA0]u8,
@@ -174,18 +174,38 @@ const BusState = struct {
     apu: Apu,
     dma: Dma,
     mbc: Mbc.Snapshot,
+};
+
+const CoreSnapshot = struct {
+    cpu: CpuState,
+    bus: CoreBusState,
+    ppu: Ppu,
+    steps: usize,
+    frames: usize,
+};
+
+/// A complete, allocation-free mutable machine snapshot. The fixed cartridge
+/// RAM reserve preserves the original value API; branch-heavy callers should
+/// prefer `OwnedSnapshot`, which stores only the cartridge RAM actually used.
+pub const Snapshot = struct {
+    core: CoreSnapshot,
     cart_ram_len: usize,
     cart_ram: [MAX_CART_RAM_BYTES]u8,
 };
 
-/// A complete mutable machine snapshot. ROM bytes and allocation ownership are
-/// deliberately excluded, so restoring never invalidates host-owned storage.
-pub const Snapshot = struct {
-    cpu: CpuState,
-    bus: BusState,
-    ppu: Ppu,
-    steps: usize,
-    frames: usize,
+pub const OwnedSnapshot = struct {
+    allocator: Allocator,
+    core: CoreSnapshot,
+    cartridge_ram: []u8,
+
+    pub fn deinit(self: *OwnedSnapshot) void {
+        self.allocator.free(self.cartridge_ram);
+        self.* = undefined;
+    }
+
+    pub fn byteSize(self: *const OwnedSnapshot) usize {
+        return @sizeOf(CoreSnapshot) + self.cartridge_ram.len;
+    }
 };
 
 const CycleInputCursor = struct {
@@ -229,7 +249,7 @@ pub const Machine = struct {
     pub fn fork(self: *const Machine, allocator: Allocator) !Machine {
         const cartridge = try self.bus.cartridge.cloneForMachine(allocator);
         var branch = Machine.init(allocator, cartridge, self.options);
-        branch.restore(self.capture());
+        self.copyHardwareStateTo(&branch);
         return branch;
     }
 
@@ -454,47 +474,48 @@ pub const Machine = struct {
     }
 
     pub fn capture(self: *const Machine) Snapshot {
-        return .{
-            .cpu = .{
-                .af = self.cpu.af,
-                .bc = self.cpu.bc,
-                .de = self.cpu.de,
-                .hl = self.cpu.hl,
-                .sp = self.cpu.sp,
-                .pc = self.cpu.pc,
-                .ime = self.cpu.ime,
-                .ime_enable_delay = self.cpu.ime_enable_delay,
-                .halted = self.cpu.halted,
-                .halt_bug = self.cpu.halt_bug,
-                .cycles = self.cpu.cycles,
-            },
-            .bus = self.captureBusState(),
-            .ppu = self.ppu,
-            .steps = self.steps,
-            .frames = self.frames,
+        var snapshot: Snapshot = .{
+            .core = self.captureCoreState(),
+            .cart_ram_len = 0,
+            .cart_ram = [_]u8{0} ** MAX_CART_RAM_BYTES,
         };
+        if (self.bus.cartridge.ram_data) |ram| {
+            snapshot.cart_ram_len = @min(ram.len, MAX_CART_RAM_BYTES);
+            @memcpy(snapshot.cart_ram[0..snapshot.cart_ram_len], ram[0..snapshot.cart_ram_len]);
+        }
+        return snapshot;
     }
 
     pub fn restore(self: *Machine, state: Snapshot) void {
-        self.cpu.af = state.cpu.af;
-        self.cpu.bc = state.cpu.bc;
-        self.cpu.de = state.cpu.de;
-        self.cpu.hl = state.cpu.hl;
-        self.cpu.sp = state.cpu.sp;
-        self.cpu.pc = state.cpu.pc;
-        self.cpu.ime = state.cpu.ime;
-        self.cpu.ime_enable_delay = state.cpu.ime_enable_delay;
-        self.cpu.halted = state.cpu.halted;
-        self.cpu.halt_bug = state.cpu.halt_bug;
-        self.cpu.cycles = state.cpu.cycles;
-        self.cpu.reader_ctx = undefined;
+        self.applyCoreState(state.core);
+        if (self.bus.cartridge.ram_data) |ram| {
+            const len = @min(@min(ram.len, MAX_CART_RAM_BYTES), state.cart_ram_len);
+            if (len > 0) @memcpy(ram[0..len], state.cart_ram[0..len]);
+            if (ram.len > len) @memset(ram[len..], 0);
+        }
+    }
 
-        self.applyBusState(state.bus);
-        const capture_pixels = self.ppu.isPixelCaptureEnabled();
-        self.ppu = state.ppu;
-        self.ppu.setPixelCapture(capture_pixels);
-        self.steps = state.steps;
-        self.frames = state.frames;
+    /// Capture a complete save state using only the cartridge RAM length this
+    /// machine actually owns. The caller owns the result and must call deinit.
+    pub fn captureOwned(self: *const Machine, allocator: Allocator) !OwnedSnapshot {
+        const ram_len = if (self.bus.cartridge.ram_data) |ram| ram.len else 0;
+        const cartridge_ram = try allocator.alloc(u8, ram_len);
+        if (self.bus.cartridge.ram_data) |ram| @memcpy(cartridge_ram, ram);
+        return .{
+            .allocator = allocator,
+            .core = self.captureCoreState(),
+            .cartridge_ram = cartridge_ram,
+        };
+    }
+
+    pub fn restoreOwned(
+        self: *Machine,
+        state: *const OwnedSnapshot,
+    ) error{CartridgeRamSizeMismatch}!void {
+        const ram_len = if (self.bus.cartridge.ram_data) |ram| ram.len else 0;
+        if (ram_len != state.cartridge_ram.len) return error.CartridgeRamSizeMismatch;
+        self.applyCoreState(state.core);
+        if (self.bus.cartridge.ram_data) |ram| @memcpy(ram, state.cartridge_ram);
     }
 
     pub fn inspectCartridge(self: *const Machine) Cartridge.Inspection {
@@ -640,8 +661,30 @@ pub const Machine = struct {
         self.bus.cartridge.mbc.tick(cycles);
     }
 
-    fn captureBusState(self: *const Machine) BusState {
-        var state = BusState{
+    fn captureCoreState(self: *const Machine) CoreSnapshot {
+        return .{
+            .cpu = .{
+                .af = self.cpu.af,
+                .bc = self.cpu.bc,
+                .de = self.cpu.de,
+                .hl = self.cpu.hl,
+                .sp = self.cpu.sp,
+                .pc = self.cpu.pc,
+                .ime = self.cpu.ime,
+                .ime_enable_delay = self.cpu.ime_enable_delay,
+                .halted = self.cpu.halted,
+                .halt_bug = self.cpu.halt_bug,
+                .cycles = self.cpu.cycles,
+            },
+            .bus = self.captureCoreBusState(),
+            .ppu = self.ppu,
+            .steps = self.steps,
+            .frames = self.frames,
+        };
+    }
+
+    fn captureCoreBusState(self: *const Machine) CoreBusState {
+        return .{
             .wram = self.bus.wram,
             .hram = self.bus.hram,
             .oam = self.bus.oam,
@@ -666,18 +709,70 @@ pub const Machine = struct {
             .apu = self.bus.apu,
             .dma = self.bus.dma,
             .mbc = self.bus.cartridge.mbc.snapshot(),
-            .cart_ram_len = 0,
-            .cart_ram = [_]u8{0} ** MAX_CART_RAM_BYTES,
         };
-
-        if (self.bus.cartridge.ram_data) |ram| {
-            state.cart_ram_len = @min(ram.len, MAX_CART_RAM_BYTES);
-            @memcpy(state.cart_ram[0..state.cart_ram_len], ram[0..state.cart_ram_len]);
-        }
-        return state;
     }
 
-    fn applyBusState(self: *Machine, state: BusState) void {
+    /// Copy mutable hardware directly into a freshly initialized branch. This
+    /// avoids materializing the legacy fixed-capacity snapshot, whose 128 KiB
+    /// cartridge-RAM reserve dominated fork cost even for ROM-only games.
+    fn copyHardwareStateTo(self: *const Machine, branch: *Machine) void {
+        branch.cpu = self.cpu;
+        branch.cpu.reader_ctx = undefined;
+
+        branch.bus.wram = self.bus.wram;
+        branch.bus.hram = self.bus.hram;
+        branch.bus.oam = self.bus.oam;
+        branch.bus.vram = self.bus.vram;
+
+        branch.bus.io.data = self.bus.io.data;
+        branch.bus.io.joypad_select = self.bus.io.joypad_select;
+        branch.bus.io.joypad_buttons = self.bus.io.joypad_buttons;
+        branch.bus.io.oam_scan_row = self.bus.io.oam_scan_row;
+        branch.bus.io.ppu_oam_read_blocked = self.bus.io.ppu_oam_read_blocked;
+        branch.bus.io.ppu_oam_write_blocked = self.bus.io.ppu_oam_write_blocked;
+        branch.bus.io.ppu_vram_read_blocked = self.bus.io.ppu_vram_read_blocked;
+        branch.bus.io.ppu_vram_write_blocked = self.bus.io.ppu_vram_write_blocked;
+        branch.bus.io.stat_irq_line = self.bus.io.stat_irq_line;
+        branch.bus.io.stat_mode0_suppressed = self.bus.io.stat_mode0_suppressed;
+        branch.bus.io.stat_read_early_hblank = self.bus.io.stat_read_early_hblank;
+        branch.bus.io.late_interrupts = self.bus.io.late_interrupts;
+
+        branch.bus.ie_register = self.bus.ie_register;
+        branch.bus.timer = self.bus.timer;
+        branch.bus.serial = self.bus.serial;
+        branch.bus.apu = self.bus.apu;
+        branch.bus.apu.discardSamples();
+        branch.bus.dma = self.bus.dma;
+        branch.bus.cartridge.mbc.restore(self.bus.cartridge.mbc.snapshot());
+
+        branch.ppu = self.ppu;
+        branch.steps = self.steps;
+        branch.frames = self.frames;
+    }
+
+    fn applyCoreState(self: *Machine, state: CoreSnapshot) void {
+        self.cpu.af = state.cpu.af;
+        self.cpu.bc = state.cpu.bc;
+        self.cpu.de = state.cpu.de;
+        self.cpu.hl = state.cpu.hl;
+        self.cpu.sp = state.cpu.sp;
+        self.cpu.pc = state.cpu.pc;
+        self.cpu.ime = state.cpu.ime;
+        self.cpu.ime_enable_delay = state.cpu.ime_enable_delay;
+        self.cpu.halted = state.cpu.halted;
+        self.cpu.halt_bug = state.cpu.halt_bug;
+        self.cpu.cycles = state.cpu.cycles;
+        self.cpu.reader_ctx = undefined;
+
+        self.applyCoreBusState(state.bus);
+        const capture_pixels = self.ppu.isPixelCaptureEnabled();
+        self.ppu = state.ppu;
+        self.ppu.setPixelCapture(capture_pixels);
+        self.steps = state.steps;
+        self.frames = state.frames;
+    }
+
+    fn applyCoreBusState(self: *Machine, state: CoreBusState) void {
         self.bus.wram = state.wram;
         self.bus.hram = state.hram;
         self.bus.oam = state.oam;
@@ -704,12 +799,6 @@ pub const Machine = struct {
         self.bus.apu.discardSamples();
         self.bus.dma = state.dma;
         self.bus.cartridge.mbc.restore(state.mbc);
-
-        if (self.bus.cartridge.ram_data) |ram| {
-            const len = @min(@min(ram.len, MAX_CART_RAM_BYTES), state.cart_ram_len);
-            if (len > 0) @memcpy(ram[0..len], state.cart_ram[0..len]);
-            if (ram.len > len) @memset(ram[len..], 0);
-        }
     }
 };
 
@@ -749,7 +838,7 @@ test "machine snapshot restores mutable hardware and mapper state" {
 
     try std.testing.expectEqual(@as(u16, 0x1234), machine.cpu.pc);
     try std.testing.expectEqual(@as(u8, 0xA5), machine.bus.wram[7]);
-    try std.testing.expectEqual(state.bus.mbc.rom_bank, machine.bus.cartridge.mbc.snapshot().rom_bank);
+    try std.testing.expectEqual(state.core.bus.mbc.rom_bank, machine.bus.cartridge.mbc.snapshot().rom_bank);
 }
 
 test "machine button API uses the DMG active-low layout" {
@@ -885,4 +974,29 @@ test "deterministic reset clears episode RAM and reseeds MBC3 time" {
     try std.testing.expectEqual(@as(u9, 42), inspection.mapper.rtc.day);
     try std.testing.expectEqual(@as(u32, 99), inspection.mapper.rtc.cycle_accumulator);
     try std.testing.expectEqual(@as(u8, 0xDF), machine.bus.io.getJoypadState());
+}
+
+test "owned snapshots store only the cartridge RAM in use" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").rtcCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+    machine.cpu.pc = 0x4567;
+    machine.bus.wram[9] = 0xAB;
+    machine.bus.cartridge.ram_data.?[17] = 0xCD;
+
+    var state = try machine.captureOwned(std.testing.allocator);
+    defer state.deinit();
+    try std.testing.expectEqual(@as(usize, 0x2000), state.cartridge_ram.len);
+    try std.testing.expect(state.byteSize() < @sizeOf(Snapshot));
+
+    machine.cpu.pc = 0;
+    machine.bus.wram[9] = 0;
+    machine.bus.cartridge.ram_data.?[17] = 0;
+    try machine.restoreOwned(&state);
+    try std.testing.expectEqual(@as(u16, 0x4567), machine.cpu.pc);
+    try std.testing.expectEqual(@as(u8, 0xAB), machine.bus.wram[9]);
+    try std.testing.expectEqual(@as(u8, 0xCD), machine.bus.cartridge.ram_data.?[17]);
 }

@@ -4,6 +4,7 @@ const bench_cli = @import("bench_cli.zig");
 
 const dmg_clock_hz = 4_194_304.0;
 const fork_count = 1_000;
+const snapshot_count = 1_000;
 const parallel_instruction_limit = 1_000_000;
 
 const help_text =
@@ -80,6 +81,25 @@ pub fn main(init: std.process.Init) !void {
     const frames_per_second = @as(f64, @floatFromInt(measured_frames)) / seconds;
     const cartridge_info = machine.inspectCartridge();
 
+    var owned_snapshot = try machine.captureOwned(init.gpa);
+    defer owned_snapshot.deinit();
+    const owned_snapshot_bytes = owned_snapshot.byteSize();
+
+    const snapshot_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..snapshot_count) |_| {
+        var state = try machine.captureOwned(init.gpa);
+        state.deinit();
+    }
+    const snapshot_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const snapshot_seconds = @as(f64, @floatFromInt(snapshot_finish - snapshot_start)) / std.time.ns_per_s;
+    const snapshots_per_second = snapshot_count / snapshot_seconds;
+
+    const restore_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..snapshot_count) |_| try machine.restoreOwned(&owned_snapshot);
+    const restore_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const restore_seconds = @as(f64, @floatFromInt(restore_finish - restore_start)) / std.time.ns_per_s;
+    const restores_per_second = snapshot_count / restore_seconds;
+
     const fork_start = std.Io.Clock.awake.now(init.io).nanoseconds;
     for (0..fork_count) |_| {
         var branch = try machine.fork(init.gpa);
@@ -124,7 +144,12 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("  Real-time factor: {d:.2}x\n", .{cycles_per_second / dmg_clock_hz});
     try stdout.print("  Completed frames/s: {d:.3}\n", .{frames_per_second});
     try stdout.print("  State digest: {X:0>16}\n", .{expected_digest.?});
-    try stdout.print("  Forks/s: {d:.3} ({d} byte snapshot)\n", .{
+    try stdout.print("  Owned snapshots/s: {d:.3} capture, {d:.3} restore ({d} bytes)\n", .{
+        snapshots_per_second,
+        restores_per_second,
+        owned_snapshot_bytes,
+    });
+    try stdout.print("  Forks/s: {d:.3} ({d} byte fixed snapshot compatibility type)\n", .{
         forks_per_second,
         @sizeOf(nibble.Snapshot),
     });

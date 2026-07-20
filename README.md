@@ -74,8 +74,9 @@ zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 `nibble-bench` measures the simulation core directly: it does not initialize
 SDL, pace frames, or mix host PCM samples. Every trial restores the same machine
 snapshot and verifies that it ends with the same observable-state digest. It
-also reports deterministic machine forks per second, current snapshot size, and
-aggregate multicore throughput through Zig 0.16's `std.Io.Group` concurrency.
+also reports owned snapshot capture/restore rates, deterministic machine forks
+per second, and aggregate multicore throughput through Zig 0.16's
+`std.Io.Group` concurrency.
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \
@@ -106,16 +107,19 @@ Important automation operations include:
   including transitions inside a CPU instruction;
 - deterministic power-on RTC seeds and `resetDeterministic` for reproducible
   episodes that optionally clear battery-backed cartridge RAM;
-- `capture`, `restore`, and `fork` for deterministic branches and replay;
+- allocation-free `capture`/`restore`, compact `captureOwned`/`restoreOwned`,
+  and `fork` for deterministic branches and replay;
 - `MachineBatch` for parallel instruction or bounded-frame advancement;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
 
 Forks retain one atomically reference-counted immutable ROM allocation while
-owning independent hardware and cartridge-RAM state. Snapshots currently contain
-a fixed-capacity cartridge-RAM image; reducing that copy size remains follow-up
-work before very large in-memory search trees are practical.
+owning independent hardware and cartridge-RAM state. Forking copies hardware
+directly instead of materializing the fixed 128 KiB cartridge-RAM reserve.
+`OwnedSnapshot` similarly allocates only the cartridge RAM present in the
+loaded cartridge; the larger value `Snapshot` remains available for callers
+that require allocation-free capture and restore.
 
 CLI options:
 - `-h`, `--help`: show help
