@@ -117,6 +117,13 @@ Important automation operations include:
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
 
+`Debugger` is an opt-in research wrapper around `Machine`: it provides fixed-
+capacity PC breakpoints, instruction-boundary value watchpoints, mapper-bank
+transition events, frame events, a bounded history ring, and non-intrusive
+disassembly. Because it drives `Machine.step` from the outside, normal headless
+execution contains no debugger callback or trace branch. This makes it useful
+for investigating cartridge behavior without taxing training runs.
+
 Forks retain one atomically reference-counted immutable ROM allocation while
 owning independent hardware and cartridge-RAM state. Forking copies hardware
 directly instead of materializing the fixed 128 KiB cartridge-RAM reserve.

@@ -79,6 +79,13 @@ single-frame, and observation-selective multi-frame operations share this
 partitioning, and caller-provided result slices preserve machine order without
 allocating in the batch API.
 
+`Debugger` is an optional execution adapter rather than a dependency of the
+machine core. It checks PC breakpoints before stepping, compares caller-selected
+memory values at instruction boundaries, records mapper-bank and frame changes,
+and keeps a bounded event ring. Disassembly uses `peek`, so inspection neither
+advances time nor changes bus arbitration. Keeping this layer outside `Machine`
+means disabled tracing has zero branches in the normal interpreter loop.
+
 ## Accuracy model
 
 The shared clock is measured in T-cycles (4,194,304 per second on DMG). CPU bus
