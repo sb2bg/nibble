@@ -52,10 +52,11 @@ for the workload model, measured performance, and demo direction, and
 - `Ppu` owns dot timing, background/window fetch state, pixel FIFOs,
   window-line state, and the logical DMG frame buffer. It emits a frame-ready
   edge but has no dependency on SDL or host input.
-- `SdlFrontend` owns the host window, texture conversion, keyboard mapping,
-  queued audio device, and management UI. It also owns presentation-only
-  choices such as scaling, fullscreen state, mute, and color themes. It is
-  optional; graphical and headless runs execute the same PPU and APU cores.
+- `SdlFrontend` owns the host game and debugger windows, texture conversion,
+  keyboard mapping, queued audio device, and management UI. It also owns
+  presentation-only choices such as scaling, fullscreen state, mute, and color
+  themes. It is optional; graphical and headless runs execute the same PPU and
+  APU cores.
 - `agent.AgentRuntime` is a host composition layer. It owns a reusable branch
   pool, accepts `std.Io`, schedules independent machines, and writes contiguous
   model observations. It does not own hardware, rewards, episode semantics, or

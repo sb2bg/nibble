@@ -10,10 +10,12 @@ const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
 const WINDOW_SCALE = 3;
 const VIEWPORT_X = 8;
 const VIEWPORT_Y = 8;
-const PANEL_X = VIEWPORT_X + SCREEN_WIDTH + 8;
-const PANEL_WIDTH = 72;
-const LOGICAL_WIDTH = PANEL_X + PANEL_WIDTH + 8;
+const LOGICAL_WIDTH = SCREEN_WIDTH + VIEWPORT_X * 2;
 const LOGICAL_HEIGHT = SCREEN_HEIGHT + VIEWPORT_Y * 2;
+const INSPECTOR_WIDTH = 128;
+const INSPECTOR_HEIGHT = 160;
+const INSPECTOR_SCALE = 3;
+const WINDOW_GAP = 24;
 const AUDIO_BATCH_SAMPLES = 128;
 const MAX_QUEUED_AUDIO_BYTES = apu_mod.SAMPLE_RATE * @sizeOf(StereoSample) / 10;
 
@@ -65,6 +67,10 @@ pub const SdlFrontend = struct {
     window: *sdl.Window,
     renderer: *sdl.Renderer,
     texture: *sdl.Texture,
+    inspector_window: *sdl.Window,
+    inspector_renderer: *sdl.Renderer,
+    main_window_id: u32,
+    inspector_window_id: u32,
     audio_device: ?sdl.AudioDeviceId = null,
     audio_muted: bool = false,
 
@@ -136,6 +142,42 @@ pub const SdlFrontend = struct {
             std.debug.print("SDL_CreateTexture Error: {s}\n", .{sdl.getError()});
             return error.SdlTextureFailed;
         };
+        errdefer sdl.destroyTexture(texture);
+
+        const inspector_window = sdl.createWindow(
+            "Nibble Debugger",
+            sdl.WINDOWPOS_CENTERED,
+            sdl.WINDOWPOS_CENTERED,
+            INSPECTOR_WIDTH * INSPECTOR_SCALE,
+            INSPECTOR_HEIGHT * INSPECTOR_SCALE,
+            sdl.WINDOW_SHOWN | sdl.WINDOW_RESIZABLE | sdl.WINDOW_ALLOW_HIGHDPI,
+        ) catch {
+            std.debug.print("SDL_CreateWindow Error: {s}\n", .{sdl.getError()});
+            return error.SdlInspectorWindowFailed;
+        };
+        errdefer sdl.destroyWindow(inspector_window);
+        sdl.setWindowMinimumSize(inspector_window, INSPECTOR_WIDTH * 2, INSPECTOR_HEIGHT * 2);
+
+        // The game renderer owns frame pacing. A second vsync renderer could
+        // make every presented frame wait twice on some SDL backends.
+        const inspector_renderer = sdl.createRenderer(
+            inspector_window,
+            -1,
+            sdl.RENDERER_ACCELERATED,
+        ) catch {
+            std.debug.print("SDL_CreateRenderer Error: {s}\n", .{sdl.getError()});
+            return error.SdlInspectorRendererFailed;
+        };
+        errdefer sdl.destroyRenderer(inspector_renderer);
+        try sdl.setLogicalSize(inspector_renderer, INSPECTOR_WIDTH, INSPECTOR_HEIGHT);
+        try sdl.setRenderDrawColor(inspector_renderer, 0x0B, 0x0F, 0x12, 0xFF);
+
+        const main_position = sdl.getWindowPosition(window);
+        sdl.setWindowPosition(
+            inspector_window,
+            main_position.x + LOGICAL_WIDTH * WINDOW_SCALE + WINDOW_GAP,
+            main_position.y,
+        );
 
         const audio_device = initAudio() catch |err| blk: {
             std.debug.print("Warning: SDL audio unavailable ({s}): {s}\n", .{ @errorName(err), sdl.getError() });
@@ -146,6 +188,10 @@ pub const SdlFrontend = struct {
             .window = window,
             .renderer = renderer,
             .texture = texture,
+            .inspector_window = inspector_window,
+            .inspector_renderer = inspector_renderer,
+            .main_window_id = sdl.getWindowId(window),
+            .inspector_window_id = sdl.getWindowId(inspector_window),
             .audio_device = audio_device,
         };
         frontend.refreshWindowTitle();
@@ -154,6 +200,8 @@ pub const SdlFrontend = struct {
 
     pub fn deinit(self: *SdlFrontend) void {
         if (self.audio_device) |device| sdl.closeAudioDevice(device);
+        sdl.destroyRenderer(self.inspector_renderer);
+        sdl.destroyWindow(self.inspector_window);
         sdl.destroyTexture(self.texture);
         sdl.destroyRenderer(self.renderer);
         sdl.destroyWindow(self.window);
@@ -185,8 +233,8 @@ pub const SdlFrontend = struct {
             .h = SCREEN_HEIGHT,
         };
         sdl.renderCopy(self.renderer, self.texture, null, &viewport) catch {};
-        if (self.inspector_visible) self.drawInspector();
         sdl.renderPresent(self.renderer);
+        if (self.inspector_visible) self.drawInspector();
     }
 
     pub fn pollEvents(self: *SdlFrontend, bus: anytype) UiActions {
@@ -194,7 +242,17 @@ pub const SdlFrontend = struct {
 
         var event: sdl.Event = undefined;
         while (sdl.pollEvent(&event)) {
-            if (event.type == sdl.QUIT) actions.quit = true;
+            switch (event.type) {
+                sdl.QUIT => actions.quit = true,
+                sdl.WINDOWEVENT => if (event.window.event == sdl.WINDOWEVENT_CLOSE) {
+                    if (event.window.window_id == self.inspector_window_id) {
+                        self.setInspectorVisible(false);
+                    } else if (event.window.window_id == self.main_window_id) {
+                        actions.quit = true;
+                    }
+                },
+                else => {},
+            }
         }
 
         sdl.pumpEvents();
@@ -225,7 +283,7 @@ pub const SdlFrontend = struct {
             actions.step_instruction = edgePressed(&self.prev_step_key, isPressed(keys, sdl.SCANCODE_F10));
 
             if (edgePressed(&self.prev_inspector_key, isPressed(keys, sdl.SCANCODE_F1))) {
-                self.inspector_visible = !self.inspector_visible;
+                self.setInspectorVisible(!self.inspector_visible);
                 actions.redraw = true;
             }
 
@@ -297,6 +355,17 @@ pub const SdlFrontend = struct {
         self.inspector = inspector;
     }
 
+    fn setInspectorVisible(self: *SdlFrontend, visible: bool) void {
+        if (self.inspector_visible == visible) return;
+        self.inspector_visible = visible;
+        if (visible) {
+            sdl.showWindow(self.inspector_window);
+            sdl.raiseWindow(self.inspector_window);
+        } else {
+            sdl.hideWindow(self.inspector_window);
+        }
+    }
+
     pub fn audioBatchReady(self: *const SdlFrontend, sample_count: usize) bool {
         _ = self;
         return sample_count >= AUDIO_BATCH_SAMPLES;
@@ -352,36 +421,50 @@ pub const SdlFrontend = struct {
     }
 
     fn drawInspector(self: *SdlFrontend) void {
-        const panel: sdl.Rect = .{
-            .x = PANEL_X,
-            .y = VIEWPORT_Y,
-            .w = PANEL_WIDTH,
-            .h = SCREEN_HEIGHT,
-        };
-        sdl.setRenderDrawColor(self.renderer, 0x10, 0x1B, 0x21, 0xFF) catch {};
-        sdl.fillRect(self.renderer, &panel) catch {};
+        const renderer = self.inspector_renderer;
+        sdl.setRenderDrawColor(renderer, 0x0B, 0x0F, 0x12, 0xFF) catch {};
+        sdl.renderClear(renderer) catch {};
+
+        const header: sdl.Rect = .{ .x = 0, .y = 0, .w = INSPECTOR_WIDTH, .h = 28 };
+        sdl.setRenderDrawColor(renderer, 0x10, 0x1B, 0x21, 0xFF) catch {};
+        sdl.fillRect(renderer, &header) catch {};
 
         const text = 0xD8E8E0;
         const muted = 0x7A918A;
         const accent = palettes[self.palette_index].colors[1];
-        drawText(self.renderer, "NIBBLE LAB", PANEL_X + 5, 13, accent);
-        drawText(self.renderer, if (self.ui_paused) "PAUSED" else "RUNNING", PANEL_X + 5, 23, if (self.ui_paused) 0xFFBE55 else text);
+        const accent_bar: sdl.Rect = .{ .x = 0, .y = 0, .w = 3, .h = 28 };
+        sdl.setRenderDrawColor(
+            renderer,
+            @intCast((accent >> 16) & 0xFF),
+            @intCast((accent >> 8) & 0xFF),
+            @intCast(accent & 0xFF),
+            0xFF,
+        ) catch {};
+        sdl.fillRect(renderer, &accent_bar) catch {};
+
+        drawText(renderer, "NIBBLE DEBUGGER", 8, 7, accent);
+        drawText(renderer, if (self.ui_paused) "PAUSED" else "RUNNING", 8, 17, if (self.ui_paused) 0xFFBE55 else text);
 
         var buf: [32]u8 = undefined;
-        drawFormatted(self.renderer, &buf, "PC {X:0>4}", .{self.inspector.pc}, PANEL_X + 5, 34, text);
-        drawText(self.renderer, self.inspector.mnemonic, PANEL_X + 5, 42, accent);
-        drawFormatted(self.renderer, &buf, "AF {X:0>4}", .{self.inspector.af}, PANEL_X + 5, 52, text);
-        drawFormatted(self.renderer, &buf, "BC {X:0>4}", .{self.inspector.bc}, PANEL_X + 5, 60, text);
-        drawFormatted(self.renderer, &buf, "DE {X:0>4}", .{self.inspector.de}, PANEL_X + 5, 68, text);
-        drawFormatted(self.renderer, &buf, "HL {X:0>4}", .{self.inspector.hl}, PANEL_X + 5, 76, text);
-        drawFormatted(self.renderer, &buf, "SP {X:0>4}", .{self.inspector.sp}, PANEL_X + 5, 84, text);
-        drawFormatted(self.renderer, &buf, "ROM {X:0>3}", .{self.inspector.upper_rom_bank}, PANEL_X + 5, 95, text);
-        drawFormatted(self.renderer, &buf, "RAM {X:0>2}", .{self.inspector.effective_ram_bank}, PANEL_X + 5, 103, text);
-        drawFormatted(self.renderer, &buf, "FRAME {d}", .{self.inspector.frames}, PANEL_X + 5, 114, text);
-        drawFormatted(self.renderer, &buf, "{d}.{d:0>2} FPS", .{ self.inspector.fps_x100 / 100, self.inspector.fps_x100 % 100 }, PANEL_X + 5, 122, accent);
+        drawText(renderer, "CPU", 8, 34, muted);
+        drawFormatted(renderer, &buf, "PC {X:0>4}", .{self.inspector.pc}, 8, 44, text);
+        drawText(renderer, self.inspector.mnemonic, 72, 44, accent);
+        drawFormatted(renderer, &buf, "AF {X:0>4}", .{self.inspector.af}, 8, 54, text);
+        drawFormatted(renderer, &buf, "BC {X:0>4}", .{self.inspector.bc}, 72, 54, text);
+        drawFormatted(renderer, &buf, "DE {X:0>4}", .{self.inspector.de}, 8, 64, text);
+        drawFormatted(renderer, &buf, "HL {X:0>4}", .{self.inspector.hl}, 72, 64, text);
+        drawFormatted(renderer, &buf, "SP {X:0>4}", .{self.inspector.sp}, 8, 74, text);
 
-        drawFormatted(self.renderer, &buf, "DOT {X:0>8}", .{@as(u32, @truncate(self.inspector.cycles))}, PANEL_X + 5, 133, text);
-        drawText(self.renderer, "F10 STEP", PANEL_X + 5, 143, if (self.ui_paused) accent else muted);
+        drawText(renderer, "MAPPER", 8, 88, muted);
+        drawFormatted(renderer, &buf, "ROM {X:0>3}", .{self.inspector.upper_rom_bank}, 8, 98, text);
+        drawFormatted(renderer, &buf, "RAM {X:0>2}", .{self.inspector.effective_ram_bank}, 72, 98, text);
+
+        drawText(renderer, "TIMING", 8, 112, muted);
+        drawFormatted(renderer, &buf, "FRAME {d}", .{self.inspector.frames}, 8, 122, text);
+        drawFormatted(renderer, &buf, "DOT {X:0>8}", .{@as(u32, @truncate(self.inspector.cycles))}, 8, 132, text);
+        drawFormatted(renderer, &buf, "{d}.{d:0>2} FPS", .{ self.inspector.fps_x100 / 100, self.inspector.fps_x100 % 100 }, 8, 142, accent);
+        drawText(renderer, "F10 STEP", 84, 150, if (self.ui_paused) accent else muted);
+        sdl.renderPresent(renderer);
     }
 
     fn edgePressed(previous: *bool, current: bool) bool {
@@ -412,8 +495,8 @@ fn drawFormatted(
     drawText(renderer, rendered, x, y, rgb);
 }
 
-/// Draw a dependency-free 3x5 pixel font. Keeping the inspector in SDL's
-/// logical coordinate space makes it crisp under integer and HiDPI scaling.
+/// Draw a dependency-free 3x5 pixel font in the inspector's logical
+/// coordinate space so it remains crisp under integer and HiDPI scaling.
 fn drawText(renderer: *sdl.Renderer, text: []const u8, start_x: c_int, y: c_int, rgb: u32) void {
     sdl.setRenderDrawColor(
         renderer,
@@ -440,7 +523,7 @@ fn drawText(renderer: *sdl.Renderer, text: []const u8, start_x: c_int, y: c_int,
             }
         }
         x += 4;
-        if (x >= LOGICAL_WIDTH - 3) return;
+        if (x >= INSPECTOR_WIDTH - 3) return;
     }
 }
 

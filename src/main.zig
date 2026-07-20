@@ -32,7 +32,7 @@ const help_text =
     \\  [ / ]   : Previous/next save slot
     \\  C       : Cycle display palette
     \\  M       : Mute/unmute audio
-    \\  F1      : Show/hide research inspector
+    \\  F1      : Show/hide detached debugger
     \\  F10     : Step one instruction while paused
     \\  F11     : Toggle fullscreen
     \\  Esc     : Quit

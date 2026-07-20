@@ -14,11 +14,31 @@ pub const Rect = extern struct {
     h: c_int,
 };
 
-// SDL Event (simplified - 56 bytes to match SDL2's union size)
-pub const Event = extern struct {
+pub const WindowEvent = extern struct {
     type: u32,
-    padding: [52]u8 = undefined,
+    timestamp: u32,
+    window_id: u32,
+    event: u8,
+    padding1: u8,
+    padding2: u8,
+    padding3: u8,
+    data1: i32,
+    data2: i32,
 };
+
+// SDL_Event is a 56-byte union on SDL2. The u64 member preserves the native
+// union alignment required by event variants containing pointers.
+pub const Event = extern union {
+    type: u32,
+    window: WindowEvent,
+    padding: [56]u8,
+    aligner: u64,
+};
+
+comptime {
+    if (@sizeOf(Event) != 56) @compileError("SDL2 event ABI size changed");
+    if (@offsetOf(WindowEvent, "window_id") != 8) @compileError("SDL2 window event ABI changed");
+}
 
 pub const AudioSpec = extern struct {
     freq: c_int,
@@ -34,8 +54,10 @@ pub const AudioSpec = extern struct {
 
 // Event types
 pub const QUIT = 0x100;
+pub const WINDOWEVENT = 0x200;
 pub const KEYDOWN = 0x300;
 pub const KEYUP = 0x301;
+pub const WINDOWEVENT_CLOSE: u8 = 14;
 
 // Init flags
 pub const INIT_VIDEO: u32 = 0x00000020;
@@ -76,6 +98,12 @@ extern fn SDL_DestroyWindow(window: *Window) void;
 extern fn SDL_SetWindowTitle(window: *Window, title: [*:0]const u8) void;
 extern fn SDL_SetWindowMinimumSize(window: *Window, min_w: c_int, min_h: c_int) void;
 extern fn SDL_SetWindowFullscreen(window: *Window, flags: u32) c_int;
+extern fn SDL_GetWindowID(window: *Window) u32;
+extern fn SDL_GetWindowPosition(window: *Window, x: *c_int, y: *c_int) void;
+extern fn SDL_SetWindowPosition(window: *Window, x: c_int, y: c_int) void;
+extern fn SDL_ShowWindow(window: *Window) void;
+extern fn SDL_HideWindow(window: *Window) void;
+extern fn SDL_RaiseWindow(window: *Window) void;
 
 extern fn SDL_CreateRenderer(window: *Window, index: c_int, flags: u32) ?*Renderer;
 extern fn SDL_DestroyRenderer(renderer: *Renderer) void;
@@ -173,6 +201,33 @@ pub fn setWindowMinimumSize(window: *Window, width: c_int, height: c_int) void {
 pub fn setWindowFullscreen(window: *Window, fullscreen: bool) !void {
     const flags: u32 = if (fullscreen) WINDOW_FULLSCREEN_DESKTOP else 0;
     if (SDL_SetWindowFullscreen(window, flags) < 0) return error.SdlFullscreenFailed;
+}
+
+pub fn getWindowId(window: *Window) u32 {
+    return SDL_GetWindowID(window);
+}
+
+pub fn getWindowPosition(window: *Window) struct { x: c_int, y: c_int } {
+    var x: c_int = 0;
+    var y: c_int = 0;
+    SDL_GetWindowPosition(window, &x, &y);
+    return .{ .x = x, .y = y };
+}
+
+pub fn setWindowPosition(window: *Window, x: c_int, y: c_int) void {
+    SDL_SetWindowPosition(window, x, y);
+}
+
+pub fn showWindow(window: *Window) void {
+    SDL_ShowWindow(window);
+}
+
+pub fn hideWindow(window: *Window) void {
+    SDL_HideWindow(window);
+}
+
+pub fn raiseWindow(window: *Window) void {
+    SDL_RaiseWindow(window);
 }
 
 pub fn createRenderer(window: *Window, index: c_int, flags: u32) !*Renderer {
