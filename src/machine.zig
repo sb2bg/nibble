@@ -123,6 +123,16 @@ pub const Machine = struct {
         self.bus.deinit();
     }
 
+    /// Branch the complete mutable machine state while sharing immutable ROM
+    /// bytes. The returned machine has independent RAM, mapper, IO, and output
+    /// allocations and may be stepped or destroyed on another worker.
+    pub fn fork(self: *const Machine, allocator: Allocator) !Machine {
+        const cartridge = try self.bus.cartridge.cloneForMachine(allocator);
+        var branch = Machine.init(allocator, cartridge, self.options);
+        branch.restore(self.capture());
+        return branch;
+    }
+
     /// Execute one instruction and preserve each bus access at its exact
     /// emulated phase. The callback is an internal compatibility bridge; the
     /// public machine API itself has no host callbacks.
@@ -464,4 +474,24 @@ test "machine button API uses the DMG active-low layout" {
 
     machine.setButtons(.{ .right = true, .a = true, .start = true });
     try std.testing.expectEqual(@as(u8, 0x6E), machine.bus.io.getJoypadState());
+}
+
+test "machine forks share ROM and isolate mutable state" {
+    var parent = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer parent.deinit();
+    parent.cpu.pc = 0x2345;
+    parent.bus.wram[0] = 0x42;
+
+    var branch = try parent.fork(std.testing.allocator);
+    defer branch.deinit();
+
+    try std.testing.expectEqual(parent.observableDigest(), branch.observableDigest());
+    try std.testing.expectEqual(parent.bus.cartridge.rom_data.ptr, branch.bus.cartridge.rom_data.ptr);
+    branch.bus.wram[0] = 0x99;
+    try std.testing.expectEqual(@as(u8, 0x42), parent.bus.wram[0]);
+    try std.testing.expect(parent.observableDigest() != branch.observableDigest());
 }

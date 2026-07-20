@@ -3,6 +3,23 @@ const Allocator = std.mem.Allocator;
 const Mbc = @import("../memory/mbc.zig").Mbc;
 const MbcType = @import("../memory/mbc.zig").MbcType;
 
+const SharedRom = struct {
+    allocator: Allocator,
+    references: std.atomic.Value(usize) = .init(1),
+    data: []u8,
+
+    fn retain(self: *SharedRom) void {
+        _ = self.references.fetchAdd(1, .monotonic);
+    }
+
+    fn release(self: *SharedRom) void {
+        if (self.references.fetchSub(1, .acq_rel) != 1) return;
+        const allocator = self.allocator;
+        allocator.free(self.data);
+        allocator.destroy(self);
+    }
+};
+
 /// ROM Header information
 pub const RomHeader = struct {
     title: [16]u8,
@@ -146,7 +163,8 @@ pub const Cartridge = struct {
     };
 
     allocator: Allocator,
-    rom_data: []u8,
+    shared_rom: *SharedRom,
+    rom_data: []const u8,
     ram_data: ?[]u8,
     header: RomHeader,
     mbc: Mbc,
@@ -199,8 +217,15 @@ pub const Cartridge = struct {
         } else null;
         errdefer if (ram_data) |ram| allocator.free(ram);
 
+        const shared_rom = try allocator.create(SharedRom);
+        shared_rom.* = .{
+            .allocator = allocator,
+            .data = rom_data,
+        };
+
         return Cartridge{
             .allocator = allocator,
+            .shared_rom = shared_rom,
             .rom_data = rom_data,
             .ram_data = ram_data,
             .header = header,
@@ -213,11 +238,38 @@ pub const Cartridge = struct {
         };
     }
 
+    /// Create independent mapper and cartridge-RAM state while retaining the
+    /// immutable ROM allocation. This is the ownership primitive used by
+    /// deterministic machine forks and multi-instance workloads.
+    pub fn cloneForMachine(self: *const Cartridge, allocator: Allocator) !Cartridge {
+        const ram_data: ?[]u8 = if (self.ram_data) |ram| blk: {
+            const clone = try allocator.alloc(u8, ram.len);
+            @memset(clone, 0);
+            break :blk clone;
+        } else null;
+        errdefer if (ram_data) |ram| allocator.free(ram);
+
+        self.shared_rom.retain();
+        return .{
+            .allocator = allocator,
+            .shared_rom = self.shared_rom,
+            .rom_data = self.shared_rom.data,
+            .ram_data = ram_data,
+            .header = self.header,
+            .mbc = Mbc.init(
+                self.header.getMbcType().?,
+                self.shared_rom.data,
+                ram_data,
+                self.header.cartridge_type == 0x0F or self.header.cartridge_type == 0x10,
+            ),
+        };
+    }
+
     pub fn deinit(self: *Cartridge) void {
-        self.allocator.free(self.rom_data);
         if (self.ram_data) |ram| {
             self.allocator.free(ram);
         }
+        self.shared_rom.release();
     }
 
     pub fn printInfo(self: *const Cartridge) void {
