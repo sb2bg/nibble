@@ -31,6 +31,9 @@ const help_text =
     \\  F5/F9   : Save/load state for active slot
     \\  [ / ]   : Previous/next save slot
     \\  C       : Cycle display palette
+    \\  M       : Mute/unmute audio
+    \\  F1      : Show/hide research inspector
+    \\  F10     : Step one instruction while paused
     \\  F11     : Toggle fullscreen
     \\  Esc     : Quit
     \\
