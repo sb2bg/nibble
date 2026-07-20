@@ -109,7 +109,8 @@ Important automation operations include:
   episodes that optionally clear battery-backed cartridge RAM;
 - allocation-free `capture`/`restore`, compact `captureOwned`/`restoreOwned`,
   and `fork` for deterministic branches and replay;
-- `MachineBatch` for parallel instruction or bounded-frame advancement;
+- `MachineBatch` for parallel instruction, bounded-frame, or multi-frame
+  observation-selective advancement and deterministic batch resets;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.

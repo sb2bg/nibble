@@ -74,7 +74,10 @@ they are created.
 CPU and schedules those chunks with Zig 0.16's `std.Io.Group.concurrent`. The
 emulation loop itself remains single-threaded and deterministic; concurrency is
 only introduced across machines. Backends that cannot guarantee concurrency
-fall back to completing unsubmitted chunks on the caller.
+fall back to completing unsubmitted chunks on the caller. Instruction, bounded
+single-frame, and observation-selective multi-frame operations share this
+partitioning, and caller-provided result slices preserve machine order without
+allocating in the batch API.
 
 ## Accuracy model
 

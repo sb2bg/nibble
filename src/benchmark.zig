@@ -6,6 +6,8 @@ const dmg_clock_hz = 4_194_304.0;
 const fork_count = 1_000;
 const snapshot_count = 1_000;
 const parallel_instruction_limit = 1_000_000;
+const parallel_frame_count = 100;
+const dmg_frames_per_second = 59.727500569606;
 
 const help_text =
     \\Usage: zig build bench -Doptimize=ReleaseFast -- [OPTIONS] <ROM_FILE>
@@ -128,6 +130,21 @@ pub fn main(init: std.process.Init) !void {
         if (branch.observableDigest() != batch_digest) return error.BatchStateMismatch;
     }
 
+    var frame_results: [32]nibble.FrameStepResult = undefined;
+    const frame_batch_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    try batch.stepFramesParallel(init.io, parallel_frame_count, .{
+        .video = .none,
+        .capture_audio = false,
+    }, frame_results[0..batch_count]);
+    const frame_batch_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const frame_batch_seconds = @as(f64, @floatFromInt(frame_batch_finish - frame_batch_start)) / std.time.ns_per_s;
+    var aggregate_frames: usize = 0;
+    for (frame_results[0..batch_count]) |result| {
+        if (result.timed_out) return error.BatchFrameTimeout;
+        aggregate_frames += result.frames_completed;
+    }
+    const aggregate_frames_per_second = @as(f64, @floatFromInt(aggregate_frames)) / frame_batch_seconds;
+
     try stdout.print("Nibble headless benchmark\n", .{});
     try stdout.print("  ROM: {s} ({s})\n", .{
         cartridge_info.header.getTitle(),
@@ -160,6 +177,10 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("  Aggregate T-cycles/s: {d:.3} ({d:.2} realtime machines)\n", .{
         aggregate_cycles_per_second,
         aggregate_cycles_per_second / dmg_clock_hz,
+    });
+    try stdout.print("  Timing-only frame batch: {d:.3} frames/s ({d:.2} realtime machines)\n", .{
+        aggregate_frames_per_second,
+        aggregate_frames_per_second / dmg_frames_per_second,
     });
     try stdout.flush();
 }
