@@ -508,6 +508,20 @@ pub const Machine = struct {
         };
     }
 
+    /// Refresh an existing compact checkpoint without allocating. The
+    /// checkpoint must have been created for a cartridge with the same mutable
+    /// RAM size; validation occurs before either snapshot region is changed.
+    pub fn captureOwnedInto(
+        self: *const Machine,
+        destination: *OwnedSnapshot,
+    ) error{CartridgeRamSizeMismatch}!void {
+        const ram_len = if (self.bus.cartridge.ram_data) |ram| ram.len else 0;
+        if (ram_len != destination.cartridge_ram.len) return error.CartridgeRamSizeMismatch;
+
+        destination.core = self.captureCoreState();
+        if (self.bus.cartridge.ram_data) |ram| @memcpy(destination.cartridge_ram, ram);
+    }
+
     pub fn restoreOwned(
         self: *Machine,
         state: *const OwnedSnapshot,
@@ -999,4 +1013,27 @@ test "owned snapshots store only the cartridge RAM in use" {
     try std.testing.expectEqual(@as(u16, 0x4567), machine.cpu.pc);
     try std.testing.expectEqual(@as(u8, 0xAB), machine.bus.wram[9]);
     try std.testing.expectEqual(@as(u8, 0xCD), machine.bus.cartridge.ram_data.?[17]);
+}
+
+test "owned snapshot storage can be refreshed without reallocation" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").rtcCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+    var state = try machine.captureOwned(std.testing.allocator);
+    defer state.deinit();
+    const storage = state.cartridge_ram.ptr;
+
+    machine.cpu.pc = 0x8123;
+    machine.bus.cartridge.ram_data.?[31] = 0xA7;
+    try machine.captureOwnedInto(&state);
+    try std.testing.expectEqual(storage, state.cartridge_ram.ptr);
+
+    machine.cpu.pc = 0;
+    machine.bus.cartridge.ram_data.?[31] = 0;
+    try machine.restoreOwned(&state);
+    try std.testing.expectEqual(@as(u16, 0x8123), machine.cpu.pc);
+    try std.testing.expectEqual(@as(u8, 0xA7), machine.bus.cartridge.ram_data.?[31]);
 }

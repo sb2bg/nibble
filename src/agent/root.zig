@@ -9,8 +9,11 @@ pub const stepAction = @import("action.zig").step;
 pub const FrameEncoding = @import("observation.zig").FrameEncoding;
 pub const ObservationBatch = @import("observation.zig").Batch;
 pub const observation = @import("observation.zig");
+pub const BranchId = @import("pool.zig").BranchId;
+pub const MachinePool = @import("pool.zig").MachinePool;
 
 test {
     _ = @import("action.zig");
     _ = @import("observation.zig");
+    _ = @import("pool.zig");
 }
