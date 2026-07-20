@@ -22,6 +22,7 @@ pub const RomHeader = @import("cartridge/cartridge.zig").RomHeader;
 pub const Mbc = @import("memory/mbc.zig").Mbc;
 pub const MbcType = @import("memory/mbc.zig").MbcType;
 pub const MachineBatch = @import("batch.zig").MachineBatch;
+pub const agent = @import("agent/root.zig");
 pub const Debugger = @import("debugger.zig").Debugger;
 pub const DebugEvent = @import("debugger.zig").Event;
 pub const DebugEventKind = @import("debugger.zig").EventKind;
@@ -33,4 +34,5 @@ test {
     _ = @import("machine.zig");
     _ = @import("batch.zig");
     _ = @import("debugger.zig");
+    _ = @import("agent/root.zig");
 }
