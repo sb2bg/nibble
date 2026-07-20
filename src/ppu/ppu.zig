@@ -632,11 +632,11 @@ test "blanking fast path matches dot advancement away from edges" {
     const TestBus = struct {
         io: IoRegisters,
 
-        fn readVram(_: *const @This(), _: u16) u8 {
+        pub fn readVram(_: *const @This(), _: u16) u8 {
             return 0;
         }
 
-        fn readOam(_: *const @This(), _: u16) u8 {
+        pub fn readOam(_: *const @This(), _: u16) u8 {
             return 0;
         }
     };
@@ -670,11 +670,11 @@ test "DMG LCD startup skips mode 2 and phases later scanlines" {
     const TestBus = struct {
         io: IoRegisters,
 
-        fn readVram(_: *const @This(), _: u16) u8 {
+        pub fn readVram(_: *const @This(), _: u16) u8 {
             return 0;
         }
 
-        fn readOam(_: *const @This(), _: u16) u8 {
+        pub fn readOam(_: *const @This(), _: u16) u8 {
             return 0;
         }
     };
@@ -703,6 +703,14 @@ test "DMG phases line 144 interrupt and public mode edges" {
     const IoReg = @import("../memory/io.zig").IoReg;
     const TestBus = struct {
         io: IoRegisters,
+
+        pub fn readVram(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+
+        pub fn readOam(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
     };
 
     var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
@@ -742,6 +750,14 @@ test "normal frame line zero keeps its four-dot mode 0 head" {
     const IoRegisters = @import("../memory/io.zig").IoRegisters;
     const TestBus = struct {
         io: IoRegisters,
+
+        pub fn readVram(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+
+        pub fn readOam(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
     };
 
     var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
@@ -770,7 +786,11 @@ test "OAM scan row advances after each four-dot bus window" {
     const TestBus = struct {
         io: IoRegisters,
 
-        fn readOam(_: *const @This(), _: u16) u8 {
+        pub fn readVram(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+
+        pub fn readOam(_: *const @This(), _: u16) u8 {
             return 0;
         }
     };
@@ -826,11 +846,11 @@ test "mode 3 emits background pixels through the dot FIFO" {
         vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
         oam: [0xA0]u8 = [_]u8{0} ** 0xA0,
 
-        fn readVram(self: *const @This(), address: u16) u8 {
+        pub fn readVram(self: *const @This(), address: u16) u8 {
             return self.vram[address - 0x8000];
         }
 
-        fn readOam(self: *const @This(), address: u16) u8 {
+        pub fn readOam(self: *const @This(), address: u16) u8 {
             return self.oam[address - 0xFE00];
         }
     };
@@ -860,11 +880,11 @@ test "mode 2 selects sprites and the object FIFO mixes them at output" {
         vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
         oam: [0xA0]u8 = [_]u8{0} ** 0xA0,
 
-        fn readVram(self: *const @This(), address: u16) u8 {
+        pub fn readVram(self: *const @This(), address: u16) u8 {
             return self.vram[address - 0x8000];
         }
 
-        fn readOam(self: *const @This(), address: u16) u8 {
+        pub fn readOam(self: *const @This(), address: u16) u8 {
             return self.oam[address - 0xFE00];
         }
     };

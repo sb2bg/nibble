@@ -1165,6 +1165,7 @@ test "late-dot interrupt waits for the next CPU boundary" {
     cpu.ime = true;
     bus.wram[0] = 0x00;
     bus.ie_register = Interrupt.VBLANK;
+    bus.io.clearInterrupt(Interrupt.VBLANK);
 
     const Hook = struct {
         bus: *Bus,

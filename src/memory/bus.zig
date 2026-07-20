@@ -636,10 +636,12 @@ test "CPU VRAM access is blocked during pixel transfer" {
 
     bus.vram[0] = 0x12;
     bus.io.setPpuMode(3);
+    bus.io.setPpuMemoryBlocked(false, true);
     try std.testing.expectEqual(@as(u8, 0xFF), bus.read(0x8000));
     bus.write(0x8000, 0x34);
 
     bus.io.setPpuMode(0);
+    bus.io.setPpuMemoryBlocked(false, false);
     try std.testing.expectEqual(@as(u8, 0x12), bus.read(0x8000));
 }
 
@@ -657,7 +659,9 @@ test "consecutive DMG OAM reads reproduce the POP row-latch pattern" {
     bus.applyOamReadCorruption(6);
     bus.applyOamReadCorruption(7);
 
-    const latched_row = [_]u8{ 0x30, 0x31, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
+    // The first access combines row 6 with row 5 and copies that result
+    // backward; the second advances the same row-5 latch into row 7.
+    const latched_row = [_]u8{ 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
     for (4..8) |row| {
         try std.testing.expectEqualSlices(u8, &latched_row, bus.oam[row * 8 ..][0..8]);
     }
@@ -678,7 +682,7 @@ test "consecutive DMG OAM writes propagate the PUSH row-latch pattern" {
     bus.applyOamWriteCorruption(7);
     bus.applyOamWriteCorruption(8);
 
-    const latched_row = [_]u8{ 0x30, 0x31, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
+    const latched_row = [_]u8{ 0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F };
     for (6..9) |row| {
         try std.testing.expectEqualSlices(u8, &latched_row, bus.oam[row * 8 ..][0..8]);
     }

@@ -245,7 +245,7 @@ pub const IoRegisters = struct {
             addr == 0x15 or
             addr == 0x1F or
             (addr >= 0x27 and addr <= 0x29) or
-            addr >= 0x4C;
+            (addr >= 0x4C and addr != @intFromEnum(IoReg.KEY1));
     }
 
     /// Read joypad register with proper button masking
@@ -406,6 +406,10 @@ pub const IoRegisters = struct {
         self.updateStatInterrupt();
     }
 
+    pub fn getLy(self: *const IoRegisters) u8 {
+        return self.data[@intFromEnum(IoReg.LY)];
+    }
+
     /// At the start of a visible DMG scanline, LY changes one dot before the
     /// comparator latches the new line. During that short phase coincidence
     /// reads false even if the new LY equals LYC.
@@ -487,22 +491,12 @@ pub const IoRegisters = struct {
     }
 };
 
-test "DMG unused IO bits and registers read high" {
+test "DMG unused IO registers read high" {
     var io = IoRegisters.init(std.testing.allocator);
     defer io.deinit();
 
-    for ([_]struct { addr: u8, mask: u8 }{
-        .{ .addr = @intFromEnum(IoReg.NR10), .mask = 0x80 },
-        .{ .addr = @intFromEnum(IoReg.NR30), .mask = 0x7F },
-        .{ .addr = @intFromEnum(IoReg.NR32), .mask = 0x9F },
-        .{ .addr = @intFromEnum(IoReg.NR41), .mask = 0xC0 },
-        .{ .addr = @intFromEnum(IoReg.NR44), .mask = 0x3F },
-        .{ .addr = @intFromEnum(IoReg.NR52), .mask = 0x70 },
-    }) |case| {
-        io.write(case.addr, 0);
-        try std.testing.expectEqual(case.mask, io.read(case.addr) & case.mask);
-    }
-
+    // APU addresses are intentionally tested through Apu, which owns their
+    // register masks. IoRegisters only handles the non-APU portion of FF00.
     for ([_]u8{ 0x03, 0x08, 0x15, 0x1F, 0x27, 0x4C, 0x7F }) |addr| {
         io.write(addr, 0);
         try std.testing.expectEqual(@as(u8, 0xFF), io.read(addr));

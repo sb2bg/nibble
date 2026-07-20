@@ -28,3 +28,9 @@ pub const DebugEventKind = @import("debugger.zig").EventKind;
 pub const DebugStopReason = @import("debugger.zig").StopReason;
 pub const DebugRunResult = @import("debugger.zig").RunResult;
 pub const DecodedInstruction = @import("debugger.zig").DecodedInstruction;
+
+test {
+    _ = @import("machine.zig");
+    _ = @import("batch.zig");
+    _ = @import("debugger.zig");
+}

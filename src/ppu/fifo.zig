@@ -236,7 +236,7 @@ test "fetcher produces its first tile after eight dots" {
     const TestBus = struct {
         vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
 
-        fn readVram(self: *const @This(), address: u16) u8 {
+        pub fn readVram(self: *const @This(), address: u16) u8 {
             return self.vram[address - 0x8000];
         }
     };
