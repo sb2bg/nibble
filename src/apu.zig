@@ -327,11 +327,27 @@ pub const Apu = struct {
         self.regs[regIndex(0x10)] = 0x00;
         self.regs[regIndex(0x11)] = 0x80;
         self.regs[regIndex(0x12)] = 0xF3;
+        self.regs[regIndex(0x13)] = 0xC1;
+        self.regs[regIndex(0x14)] = 0x07;
         self.regs[regIndex(0x24)] = 0x77;
         self.regs[regIndex(0x25)] = 0xF3;
+
+        // The boot ROM leaves channel 1 enabled (NR52 reads F1), but enough
+        // time passes after the second logo note for its decreasing envelope
+        // to reach zero. Keeping the register-visible status while restoring
+        // full volume here produced an endless startup buzz in idle ROMs.
         self.pulse1.enabled = true;
         self.pulse1.dac_enabled = true;
-        self.pulse1.volume = 0x0F;
+        self.pulse1.length = 64;
+        self.pulse1.timer = pulsePeriod(self.pulseFrequency(1));
+        self.pulse1.volume = 0;
+        self.pulse1.envelope_running = false;
+
+        // At handoff the analog high-pass capacitor has settled to the silent
+        // DAC level. Seeding it avoids synthesizing a startup click that the
+        // skipped boot sequence would already have filtered out.
+        self.high_pass_left = 0.25;
+        self.high_pass_right = 0.25;
     }
 
     fn writePower(self: *Apu, value: u8) void {
@@ -860,6 +876,18 @@ test "sample clock emits 48 kHz stereo frames" {
     apu.discardSamples();
     apu.tick(255, 0);
     try std.testing.expectEqual(@as(usize, 2), apu.pendingSamples().len);
+}
+
+test "post-boot audio state is silent while channel one remains active" {
+    var apu = Apu.init();
+    try std.testing.expectEqual(@as(u8, 0xF1), apu.read(0x26));
+
+    apu.tick(255, 0);
+    try std.testing.expect(apu.pendingSamples().len > 0);
+    for (apu.pendingSamples()) |sample| {
+        try std.testing.expectEqual(@as(i16, 0), sample.left);
+        try std.testing.expectEqual(@as(i16, 0), sample.right);
+    }
 }
 
 test "headless event batches match the dot reference hardware state" {
