@@ -7,6 +7,10 @@ A Nintendo Game Boy (DMG) emulator written in Zig.
 `nibble` is actively in-progress but already runs many ROMs and test ROMs.
 
 Implemented core pieces:
+- Frontend-free deterministic `Machine` API for embedding and automation
+- Bounded frame stepping, explicit button input, observable state digests, and
+  complete in-memory machine snapshots
+- Non-intrusive memory peeks and structured live cartridge/mapper inspection
 - CPU instruction decode/execute loop with interrupt handling
 - Memory bus with cartridge support and MBC banking (`ROM`, `MBC1`, `MBC2`, `MBC3`, `MBC5`)
 - Timer (`DIV/TIMA/TMA/TAC`)
@@ -64,6 +68,42 @@ zig build run -- -d -s 1000 roms/blargg/cpu_instrs/cpu_instrs.gb
 # run a Mooneye acceptance ROM and return a test-friendly exit status
 zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 ```
+
+## Headless benchmark
+
+`nibble-bench` measures the simulation core directly: it does not initialize
+SDL, pace frames, or mix host PCM samples. Every trial restores the same machine
+snapshot and verifies that it ends with the same observable-state digest.
+
+```bash
+zig build bench -Doptimize=ReleaseFast -- \
+  --steps 10000000 --warmup 1000000 --trials 5 \
+  "roms/Tetris (JUE) (V1.1) [!].gb"
+```
+
+The report includes instruction and T-cycle throughput, real-time factor,
+completed frames per second, and the deterministic digest. Use the same ROM,
+step count, Zig version, and host when comparing changes.
+
+## Embedding the core
+
+The public `nibble` module exports `Machine`, `Cartridge`, `Snapshot`, `Buttons`,
+and mapper inspection types. `Machine` has no SDL, host-clock, or filesystem
+dependency: load or construct a cartridge, step the machine, and consume only
+the outputs the caller needs.
+
+Important automation operations include:
+
+- `step` and bounded `runUntilFrame` execution;
+- `setButtons` with an explicit, host-independent input state;
+- `capture` and `restore` for deterministic branches and replay;
+- `peek` for observations that do not advance time or trigger CPU bus effects;
+- `observableDigest` for regression and replay identity; and
+- `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
+
+Snapshots currently contain a fixed-capacity cartridge-RAM image. That keeps
+restore ownership simple, but shared immutable ROMs and cheaper multi-instance
+fork storage remain follow-up work.
 
 CLI options:
 - `-h`, `--help`: show help
@@ -123,7 +163,10 @@ implemented.
 ## Project layout
 
 - `src/main.zig`: CLI entrypoint
-- `src/emulator.zig`: emulator orchestration loop
+- `src/nibble.zig`: public frontend-free package surface
+- `src/machine.zig`: deterministic hardware scheduler and snapshots
+- `src/emulator.zig`: SDL/host adapter around `Machine`
+- `src/benchmark.zig`: reproducible headless benchmark executable
 - `src/cpu/`: CPU core + instruction decode/execute
 - `src/memory/`: memory bus, IO registers, and MBC logic
 - `src/ppu/`: PPU timing and rendering

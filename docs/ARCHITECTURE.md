@@ -1,9 +1,10 @@
 # Nibble architecture
 
 Nibble is organized around hardware ownership rather than around opcode or UI
-features. The `Emulator` is the scheduler: the CPU advances the bus in T-cycles,
-and the scheduler advances the PPU, timer, APU, DMA engine, and cartridge clock
-by the same amount.
+features. `Machine` is the deterministic scheduler: the CPU advances the bus in
+T-cycles, and the scheduler advances the PPU, timer, APU, DMA engine, serial
+engine, and cartridge clock by the same amount. `Emulator` is an application
+adapter that owns SDL, host clocks, frame pacing, pause state, and UI save slots.
 
 ## Component boundaries
 
@@ -23,7 +24,8 @@ by the same amount.
   It also owns the combined edge-triggered STAT line and selected joypad lines.
 - `Mbc` owns mapper registers, address translation, MBC2 internal nibble RAM,
   and the deterministic MBC3 RTC. Mapper snapshots intentionally exclude ROM
-  and external-RAM pointers.
+  and external-RAM pointers. Its structured inspection result exposes effective
+  banks and RTC selection without allowing debugger code to mutate registers.
 - `Ppu` owns dot timing, background/window fetch state, pixel FIFOs,
   window-line state, and the logical DMG frame buffer. It emits a frame-ready
   edge but has no dependency on SDL or host input.
@@ -32,9 +34,22 @@ by the same amount.
   choices such as scaling, fullscreen state, mute, and color themes. It is
   optional; graphical and headless runs execute the same PPU and APU cores.
 
-Save states snapshot component-owned state, while immutable ROM data and owned
-allocations remain in place. Any newly persistent hardware field should be added
-to its component snapshot at the same time it is introduced.
+The public `nibble` module exports only frontend-independent pieces. A machine
+can be driven from a native application, benchmark, test runner, or future
+language binding without constructing `std.Io` or SDL. Filesystem loading is a
+convenience on `Cartridge`; `Cartridge.fromRom` is the in-memory boundary.
+
+Host outputs are explicit. Disabling PCM capture skips sample mixing but never
+disables APU registers, generators, the frame sequencer, or wave-RAM access
+windows. Similarly, a non-intrusive `peek` does not consume a bus cycle or cause
+CPU-only DMA/PPU arbitration side effects.
+
+`Machine.Snapshot` captures component-owned state, while immutable ROM data and
+owned allocations remain in place. Any newly persistent hardware field should
+be added to its component snapshot at the same time it is introduced. Snapshot
+restore clears host output queues because queued serial text and PCM are effects,
+not hardware state. The observable-state digest is a replay/regression identity,
+not a serialized save-state format or cryptographic hash.
 
 ## Accuracy model
 
