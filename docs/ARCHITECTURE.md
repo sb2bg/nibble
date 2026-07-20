@@ -57,6 +57,12 @@ count. Each branch owns its IO allocations, external cartridge RAM, mapper, and
 peripheral state, so branches may be scheduled on different workers after they
 are created.
 
+`MachineBatch` partitions independent machines into at most one chunk per host
+CPU and schedules those chunks with Zig 0.16's `std.Io.Group.concurrent`. The
+emulation loop itself remains single-threaded and deterministic; concurrency is
+only introduced across machines. Backends that cannot guarantee concurrency
+fall back to completing unsubmitted chunks on the caller.
+
 ## Accuracy model
 
 The shared clock is measured in T-cycles (4,194,304 per second on DMG). CPU bus

@@ -74,7 +74,8 @@ zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 `nibble-bench` measures the simulation core directly: it does not initialize
 SDL, pace frames, or mix host PCM samples. Every trial restores the same machine
 snapshot and verifies that it ends with the same observable-state digest. It
-also reports deterministic machine forks per second and current snapshot size.
+also reports deterministic machine forks per second, current snapshot size, and
+aggregate multicore throughput through Zig 0.16's `std.Io.Group` concurrency.
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \
@@ -98,6 +99,7 @@ Important automation operations include:
 - `step` and bounded `runUntilFrame` execution;
 - `setButtons` with an explicit, host-independent input state;
 - `capture`, `restore`, and `fork` for deterministic branches and replay;
+- `MachineBatch` for parallel instruction or bounded-frame advancement;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
