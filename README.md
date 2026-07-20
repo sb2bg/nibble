@@ -11,6 +11,7 @@ Implemented core pieces:
 - Memory bus with cartridge support and MBC banking (`ROM`, `MBC1`, `MBC2`, `MBC3`, `MBC5`)
 - Timer (`DIV/TIMA/TMA/TAC`)
 - Timed DMG OAM DMA and CPU bus lockout
+- DMG OAM corruption, including row-latch effects from 16-bit IDU operations
 - Dot-driven PPU timing with background/window and object pixel FIFOs
 - Deterministic MBC3 real-time clock registers and latching
 - SDL2 window output (with automatic headless fallback if SDL init fails)
@@ -23,7 +24,6 @@ Implemented core pieces:
 
 Known gaps:
 - No audio/APU emulation
-- OAM corruption behavior is only partially accurate (`blargg/oam_bug` still has failing subtests)
 - `STOP` instruction behavior is only partially modeled
 - Object fetch cancellation and fetcher arbitration are still approximate
 - External-clock serial transfers have no link-partner implementation
@@ -101,6 +101,17 @@ zig build test
 Test and reference ROMs are available under `roms/` (for example `roms/blargg/` and `roms/scribbltests/`).
 Mooneye binaries are downloaded separately rather than vendored; its documented
 register protocol is supported directly by `--mooneye-test`.
+
+The current DMG validation baseline passes:
+
+- all unit tests in Debug and ReleaseSafe builds;
+- 62 applicable Mooneye acceptance ROMs (excluding boot-state and non-DMG-model variants);
+- all 11 `blargg/cpu_instrs` cases;
+- `blargg/instr_timing` and both three-part memory-timing suites; and
+- all eight `blargg/oam_bug` cases.
+
+The `dmg_sound` and `cgb_sound` suites are not part of that baseline because
+audio/APU and CGB hardware are not implemented.
 
 ## Project layout
 

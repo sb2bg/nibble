@@ -37,13 +37,17 @@ to its component snapshot at the same time it is introduced.
 
 The shared clock is measured in T-cycles (4,194,304 per second on DMG). CPU bus
 accesses consume one four-T-cycle M-cycle through the bus hook; instruction-only
-cycles are applied by the emulator after execution.
+cycles with observable bus behavior are clocked at their exact execution point.
+Any remaining peripheral-invisible cycles are reconciled by the emulator after
+execution.
 
 Implemented timing details include:
 
 - timer falling-edge behavior for normal counting and DIV/TAC writes;
 - four-T-cycle TIMA overflow delay and cancellation by a TIMA write;
 - 160-M-cycle OAM DMA with DMG CPU bus lockout;
+- mode-2 OAM row-latch corruption for reads, writes, and hidden 16-bit IDU bus
+  events, including secondary, tertiary, and DMG quaternary read patterns;
 - one rising-edge-detected STAT line across mode and LYC sources;
 - variable mode 3 duration for fine SCX scrolling, window startup, and selected
   objects, with HBlank shortened so every visible line stays 456 dots;
@@ -66,7 +70,6 @@ the hardware's cancelable fetch micro-steps. Rapid mid-fetch LCDC changes and
 some background/object fetcher arbitration therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
-OAM corruption is modeled but does not pass every `blargg/oam_bug` case.
 External serial transfers wait for a clock indefinitely because link partners
 are not implemented. STOP is a low-power approximation, and the APU is absent.
 
@@ -74,9 +77,12 @@ These references define the current fidelity targets:
 
 - [Pan Docs: timer obscure behavior](https://gbdev.io/pandocs/Timer_Obscure_Behaviour.html)
 - [Pan Docs: OAM DMA](https://gbdev.io/pandocs/OAM_DMA_Transfer.html)
+- [Pan Docs: OAM corruption bug](https://gbdev.io/pandocs/OAM_Corruption_Bug.html)
 - [Pan Docs: rendering](https://gbdev.io/pandocs/Rendering.html)
 - [Pan Docs: interrupt sources and STAT blocking](https://gbdev.io/pandocs/Interrupt_Sources.html)
 - [Pan Docs: serial data transfer](https://gbdev.io/pandocs/Serial_Data_Transfer_%28Link_Cable%29.html)
 - [Pan Docs: MBC1](https://gbdev.io/pandocs/MBC1.html), [MBC2](https://gbdev.io/pandocs/MBC2.html), and [MBC3](https://gbdev.io/pandocs/MBC3.html)
-- [Mooneye Test Suite](https://github.com/Gekkio/mooneye-test-suite), whose
-  hardware-verified acceptance tests should be the next automated ROM suite.
+- [Mooneye Test Suite](https://github.com/Gekkio/mooneye-test-suite), whose 62
+  applicable DMG acceptance ROMs form the hardware-timing baseline.
+- [Blargg's Game Boy test ROMs](https://github.com/retrio/gb-test-roms), used
+  for CPU, instruction, memory, and OAM-corruption regression coverage.
