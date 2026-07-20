@@ -274,6 +274,7 @@ pub const Emulator = struct {
 
     fn syncInspector(self: *Emulator) void {
         const frontend = if (self.frontend) |*active| active else return;
+        if (!frontend.debuggerVisible()) return;
         const cpu = &self.machine.cpu;
         const mapper = self.machine.inspectCartridge().mapper;
         frontend.setInspector(.{

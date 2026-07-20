@@ -15,6 +15,8 @@ pub fn build(b: *std.Build) void {
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
     const clap = b.dependency("clap", .{});
+    const stb = b.dependency("stb", .{});
+    const jetbrains_mono = b.dependency("jetbrains_mono", .{});
 
     // Public frontend-free package module for embedding, automation, and
     // future C/Python bindings.
@@ -34,11 +36,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe.root_module.addImport("clap", clap.module("clap"));
+    configureFrontend(b, exe.root_module, stb, jetbrains_mono, target);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
     b.installArtifact(exe);
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        stb.path("LICENSE"),
+        "share/nibble/licenses/stb.txt",
+    ).step);
+    b.getInstallStep().dependOn(&b.addInstallFile(
+        jetbrains_mono.path("OFL.txt"),
+        "share/nibble/licenses/JetBrainsMono-OFL.txt",
+    ).step);
 
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
@@ -103,6 +114,7 @@ pub fn build(b: *std.Build) void {
         }),
     });
     exe_unit_tests.root_module.addImport("clap", clap.module("clap"));
+    configureFrontend(b, exe_unit_tests.root_module, stb, jetbrains_mono, target);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 
@@ -150,4 +162,20 @@ pub fn build(b: *std.Build) void {
     // Use system compiler to avoid Zig's C frontend issues with ARM NEON headers
     exe.root_module.link_libc = true;
     exe.root_module.linkSystemLibrary("sdl2", .{ .use_pkg_config = .force });
+}
+
+fn configureFrontend(
+    b: *std.Build,
+    module: *std.Build.Module,
+    stb: *std.Build.Dependency,
+    jetbrains_mono: *std.Build.Dependency,
+    target: std.Build.ResolvedTarget,
+) void {
+    module.link_libc = true;
+    if (target.result.os.tag != .windows) module.linkSystemLibrary("m", .{});
+    module.addIncludePath(stb.path("."));
+    module.addCSourceFile(.{ .file = b.path("src/frontend/stb_truetype_impl.c") });
+    module.addAnonymousImport("debugger_font", .{
+        .root_source_file = jetbrains_mono.path("fonts/ttf/JetBrainsMono-Regular.ttf"),
+    });
 }

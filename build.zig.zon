@@ -40,6 +40,14 @@
             .url = "https://github.com/Hejsil/zig-clap/archive/refs/tags/0.12.0.tar.gz",
             .hash = "clap-0.12.0-oBajB7foAQDqlSwaSG5g0yq7xGbQARUsBk5T64gAOqP5",
         },
+        .stb = .{
+            .url = "https://github.com/nothings/stb/archive/31c1ad37456438565541f4919958214b6e762fb4.tar.gz",
+            .hash = "N-V-__8AAN1DTgAKvlSQnjJwSg4ZY2JP5OHmzKOcA4BewA4Y",
+        },
+        .jetbrains_mono = .{
+            .url = "https://github.com/JetBrains/JetBrainsMono/archive/refs/tags/v2.304.tar.gz",
+            .hash = "N-V-__8AAG_BSQEsc4_xZ_VZKt_VzgAN503PVJ4ludprf3hj",
+        },
     },
     .paths = .{
         "build.zig",

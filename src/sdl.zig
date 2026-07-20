@@ -69,6 +69,7 @@ pub const AUDIO_S16LSB: u16 = 0x8010;
 
 // Window flags
 pub const WINDOW_SHOWN: u32 = 0x00000004;
+pub const WINDOW_HIDDEN: u32 = 0x00000008;
 pub const WINDOW_RESIZABLE: u32 = 0x00000020;
 pub const WINDOW_ALLOW_HIGHDPI: u32 = 0x00002000;
 pub const WINDOW_FULLSCREEN_DESKTOP: u32 = 0x00001001;
@@ -78,7 +79,10 @@ pub const RENDERER_ACCELERATED: u32 = 0x00000002;
 pub const RENDERER_PRESENTVSYNC: u32 = 0x00000004;
 
 // Texture access
+pub const TEXTUREACCESS_STATIC: c_int = 0;
 pub const TEXTUREACCESS_STREAMING: c_int = 1;
+pub const BLENDMODE_BLEND: c_int = 1;
+pub const SCALEMODE_LINEAR: c_int = 1;
 
 // Pixel formats
 pub const PIXELFORMAT_ARGB8888: u32 = 0x16362004;
@@ -113,6 +117,9 @@ extern fn SDL_RenderFillRect(renderer: *Renderer, rect: *const Rect) c_int;
 
 extern fn SDL_CreateTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, h: c_int) ?*Texture;
 extern fn SDL_DestroyTexture(texture: *Texture) void;
+extern fn SDL_SetTextureBlendMode(texture: *Texture, blend_mode: c_int) c_int;
+extern fn SDL_SetTextureColorMod(texture: *Texture, r: u8, g: u8, b: u8) c_int;
+extern fn SDL_SetTextureScaleMode(texture: *Texture, scale_mode: c_int) c_int;
 extern fn SDL_UpdateTexture(texture: *Texture, rect: ?*const anyopaque, pixels: [*]const u8, pitch: c_int) c_int;
 extern fn SDL_RenderCopy(renderer: *Renderer, texture: *Texture, srcrect: ?*const anyopaque, dstrect: ?*const anyopaque) c_int;
 extern fn SDL_RenderPresent(renderer: *Renderer) void;
@@ -258,6 +265,23 @@ pub fn createTexture(renderer: *Renderer, format: u32, access: c_int, w: c_int, 
 
 pub fn destroyTexture(texture: *Texture) void {
     SDL_DestroyTexture(texture);
+}
+
+pub fn setTextureBlendMode(texture: *Texture, blend_mode: c_int) !void {
+    if (SDL_SetTextureBlendMode(texture, blend_mode) < 0) return error.SdlTextureBlendModeFailed;
+}
+
+pub fn setTextureColor(texture: *Texture, rgb: u32) !void {
+    if (SDL_SetTextureColorMod(
+        texture,
+        @intCast((rgb >> 16) & 0xFF),
+        @intCast((rgb >> 8) & 0xFF),
+        @intCast(rgb & 0xFF),
+    ) < 0) return error.SdlTextureColorFailed;
+}
+
+pub fn setTextureScaleMode(texture: *Texture, scale_mode: c_int) !void {
+    if (SDL_SetTextureScaleMode(texture, scale_mode) < 0) return error.SdlTextureScaleModeFailed;
 }
 
 pub fn updateTexture(texture: *Texture, rect: ?*const anyopaque, pixels: []const u8, pitch: c_int) !void {

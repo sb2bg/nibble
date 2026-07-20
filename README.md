@@ -21,8 +21,8 @@ Implemented core pieces:
 - SDL2 window output (with automatic headless fallback if SDL init fails)
 - Joypad input mapping + joypad interrupt signaling
 - Resizable, high-DPI frontend with frame pacing, palette themes, and fullscreen
-- Detached live debugger window with CPU state, decoded instruction, mapper
-  banks, emulated time, host FPS, and paused single-instruction stepping
+- Optional detached debugger window with antialiased text, CPU state, decoded
+  instruction, mapper banks, emulated time, host FPS, and paused stepping
 - Emulator management hotkeys (pause, reset, save/load state, slot selection)
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
@@ -172,7 +172,7 @@ Controls (default):
 - Select: `Backspace` or `Tab`
 
 Management hotkeys (SDL mode):
-- `F1`: show/hide the detached debugger window
+- `F1`: open/hide the detached debugger window (hidden by default)
 - `P`: pause/resume emulation
 - `F10`: execute one instruction while paused
 - `R`: reset emulator
@@ -185,7 +185,7 @@ Management hotkeys (SDL mode):
 - `Esc`: quit
 - Debugger window: shows run/pause state, next instruction, CPU registers,
   active ROM and RAM banks, frame/dot counters, and measured presentation rate.
-  Closing it hides the debugger without quitting emulation.
+  It starts hidden; closing it hides the debugger without quitting emulation.
 - Window title: shows run/pause state, palette, audio state, active slot, and
   the last status message
 
@@ -239,3 +239,7 @@ implemented.
 ## Notes
 
 This project is for educational and development purposes. Use only ROMs you are legally allowed to run.
+
+The optional SDL debugger embeds JetBrains Mono under the SIL Open Font License
+and uses `stb_truetype` under its MIT/public-domain dual license. `zig build`
+installs their complete license texts under `share/nibble/licenses/`.
