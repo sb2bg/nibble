@@ -96,8 +96,12 @@ the outputs the caller needs.
 
 Important automation operations include:
 
-- `step` and bounded `runUntilFrame` execution;
-- `setButtons` with an explicit, host-independent input state;
+- `step`, bounded `runUntilFrame`, and allocation-free `stepFrames` execution;
+- per-run video policies for every frame, the final frame only, or timing-only
+  execution with no framebuffer stores;
+- `observe` for borrowed CPU, RAM, VRAM, OAM, tile-map, and framebuffer views;
+- `setButtons` and frame-boundary `FrameInput` timelines with explicit,
+  host-independent input state;
 - `capture`, `restore`, and `fork` for deterministic branches and replay;
 - `MachineBatch` for parallel instruction or bounded-frame advancement;
 - `peek` for observations that do not advance time or trigger CPU bus effects;

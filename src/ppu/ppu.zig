@@ -35,6 +35,12 @@ const LineSprite = struct {
 pub const Ppu = struct {
     frame_buffer: [SCREEN_HEIGHT][SCREEN_WIDTH]DmgColor,
 
+    // Pixel capture is a host observation policy, not emulated hardware state.
+    // The fetcher, FIFOs, sprite arbitration, and timing continue to run when
+    // this is false; only the final palette-mapped framebuffer stores are
+    // omitted.
+    capture_pixels: bool,
+
     mode: PpuMode,
     mode_cycles: u32,
     mode3_duration: u16,
@@ -66,6 +72,7 @@ pub const Ppu = struct {
     pub fn init() Ppu {
         return Ppu{
             .frame_buffer = [_][SCREEN_WIDTH]DmgColor{[_]DmgColor{.White} ** SCREEN_WIDTH} ** SCREEN_HEIGHT,
+            .capture_pixels = true,
             .mode = .VBlank,
             .mode_cycles = 0,
             .mode3_duration = 172,
@@ -94,6 +101,7 @@ pub const Ppu = struct {
     }
 
     pub fn reset(self: *Ppu) void {
+        const capture_pixels = self.capture_pixels;
         self.mode = .OamSearch;
         self.mode_cycles = 0;
         self.mode3_duration = 172;
@@ -119,6 +127,15 @@ pub const Ppu = struct {
         self.next_sprite = 0;
         self.sprite_fetch_dots = 0;
         @memset(&self.frame_buffer, [_]DmgColor{.White} ** SCREEN_WIDTH);
+        self.capture_pixels = capture_pixels;
+    }
+
+    pub fn setPixelCapture(self: *Ppu, enabled: bool) void {
+        self.capture_pixels = enabled;
+    }
+
+    pub fn isPixelCaptureEnabled(self: *const Ppu) bool {
+        return self.capture_pixels;
     }
 
     fn setMode(self: *Ppu, mode: PpuMode, bus: anytype) void {
@@ -472,16 +489,20 @@ pub const Ppu = struct {
         const color_id: u2 = if (bg_enabled) fetched_color_id else 0;
         self.bg_color_ids[x] = color_id;
 
-        const shift: u3 = @as(u3, color_id) * 2;
-        self.frame_buffer[self.ly][x] = @enumFromInt((bus.io.getBgp() >> shift) & 0x03);
+        if (self.capture_pixels) {
+            const shift: u3 = @as(u3, color_id) * 2;
+            self.frame_buffer[self.ly][x] = @enumFromInt((bus.io.getBgp() >> shift) & 0x03);
+        }
 
         const object = self.object_fifo.pop();
         if ((lcdc & 0x02) != 0 and object.color_id != 0 and
             !(object.behind_background and color_id != 0))
         {
-            const palette = if (object.palette == 0) bus.io.getObp0() else bus.io.getObp1();
-            const object_shift: u3 = @as(u3, object.color_id) * 2;
-            self.frame_buffer[self.ly][x] = @enumFromInt((palette >> object_shift) & 0x03);
+            if (self.capture_pixels) {
+                const palette = if (object.palette == 0) bus.io.getObp0() else bus.io.getObp1();
+                const object_shift: u3 = @as(u3, object.color_id) * 2;
+                self.frame_buffer[self.ly][x] = @enumFromInt((palette >> object_shift) & 0x03);
+            }
         }
 
         self.pixel_x += 1;

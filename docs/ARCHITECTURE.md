@@ -41,8 +41,13 @@ convenience on `Cartridge`; `Cartridge.fromRom` is the in-memory boundary.
 
 Host outputs are explicit. Disabling PCM capture skips sample mixing but never
 disables APU registers, generators, the frame sequencer, or wave-RAM access
-windows. Similarly, a non-intrusive `peek` does not consume a bus cycle or cause
-CPU-only DMA/PPU arbitration side effects.
+windows. Pixel capture follows the same rule: timing-only and final-frame modes
+retain the fetcher, FIFOs, sprite arbitration, palette timing, and frame edges,
+while omitting framebuffer stores that the caller will not observe. `stepFrames`
+applies caller-owned input timelines at deterministic frame boundaries, and
+`observe` returns borrowed memory, tile-map, CPU, and framebuffer views without
+allocating. Similarly, a non-intrusive `peek` does not consume a bus cycle or
+cause CPU-only DMA/PPU arbitration side effects.
 
 `Machine.Snapshot` captures component-owned state, while immutable ROM data and
 owned allocations remain in place. Any newly persistent hardware field should

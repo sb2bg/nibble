@@ -10,7 +10,8 @@ const Serial = @import("serial.zig").Serial;
 const apu_mod = @import("apu.zig");
 const Apu = apu_mod.Apu;
 const Mbc = @import("memory/mbc.zig").Mbc;
-const Ppu = @import("ppu/ppu.zig").Ppu;
+const ppu_mod = @import("ppu/ppu.zig");
+const Ppu = ppu_mod.Ppu;
 
 const MAX_CART_RAM_BYTES = 128 * 1024;
 
@@ -19,6 +20,11 @@ pub const MachineOptions = struct {
     /// capture avoids mixing samples in simulations that only observe memory
     /// or video, while all APU registers and channel generators still tick.
     capture_audio: bool = false,
+
+    /// Framebuffer pixels are host-observable output. Disabling their capture
+    /// retains the complete PPU fetch/FIFO/timing path and only omits final
+    /// palette-mapped framebuffer stores.
+    capture_video: bool = true,
 };
 
 pub const MooneyeResult = enum {
@@ -29,6 +35,64 @@ pub const MooneyeResult = enum {
 pub const StepResult = struct {
     cycles: u8,
     frame_ready: bool,
+};
+
+pub const VideoObservation = enum {
+    /// Do not update the framebuffer during this run.
+    none,
+    /// Capture only the last requested frame. Useful for frame skipping and AI.
+    final_frame,
+    /// Capture every completed frame for callers that inspect between steps.
+    every_frame,
+};
+
+pub const FrameStepOptions = struct {
+    video: VideoObservation = .final_frame,
+    /// Null keeps the machine's configured PCM policy for this run.
+    capture_audio: ?bool = null,
+    /// Prevent an LCD-disabled or crashed ROM from blocking the caller.
+    max_instructions_per_frame: usize = 1_000_000,
+};
+
+pub const FrameStepResult = struct {
+    frames_completed: usize,
+    instructions: usize,
+    cycles: u64,
+    timed_out: bool,
+};
+
+/// Input applied immediately before a requested frame begins. Events must be
+/// sorted by `frame_offset`; duplicate offsets are allowed and apply in order.
+pub const FrameInput = struct {
+    frame_offset: usize,
+    buttons: Buttons,
+};
+
+pub const CpuObservation = struct {
+    af: u16,
+    bc: u16,
+    de: u16,
+    hl: u16,
+    sp: u16,
+    pc: u16,
+    ime: bool,
+    halted: bool,
+    cycles: u64,
+};
+
+/// Borrowed, allocation-free view of state commonly consumed by agents. The
+/// slices remain valid until the machine is stepped, restored, or destroyed.
+pub const Observation = struct {
+    cpu: CpuObservation,
+    instructions: usize,
+    frames: usize,
+    wram: []const u8,
+    hram: []const u8,
+    vram: []const u8,
+    oam: []const u8,
+    background_tilemap: []const u8,
+    window_tilemap: []const u8,
+    frame_buffer: *const [ppu_mod.SCREEN_HEIGHT][ppu_mod.SCREEN_WIDTH]ppu_mod.DmgColor,
 };
 
 pub const Buttons = struct {
@@ -111,12 +175,14 @@ pub const Machine = struct {
     frames: usize = 0,
 
     pub fn init(allocator: Allocator, cartridge: Cartridge, options: MachineOptions) Machine {
-        return .{
+        var machine: Machine = .{
             .cpu = Cpu.init(),
             .bus = Bus.init(allocator, cartridge),
             .ppu = Ppu.init(),
             .options = options,
         };
+        machine.ppu.setPixelCapture(options.capture_video);
+        return machine;
     }
 
     pub fn deinit(self: *Machine) void {
@@ -186,6 +252,102 @@ pub const Machine = struct {
         return null;
     }
 
+    /// Advance a fixed number of video frames without allocating. Output
+    /// capture can be reduced independently from hardware timing.
+    pub fn stepFrames(
+        self: *Machine,
+        frame_count: usize,
+        options: FrameStepOptions,
+    ) FrameStepResult {
+        return self.stepFramesWithInputs(frame_count, &.{}, options) catch unreachable;
+    }
+
+    /// Apply a caller-owned input timeline at deterministic frame boundaries
+    /// while advancing the requested number of frames.
+    pub fn stepFramesWithInputs(
+        self: *Machine,
+        frame_count: usize,
+        inputs: []const FrameInput,
+        options: FrameStepOptions,
+    ) error{ InvalidInputFrame, UnsortedInputs }!FrameStepResult {
+        var previous_offset: usize = 0;
+        for (inputs, 0..) |input, index| {
+            if (input.frame_offset >= frame_count) return error.InvalidInputFrame;
+            if (index != 0 and input.frame_offset < previous_offset) return error.UnsortedInputs;
+            previous_offset = input.frame_offset;
+        }
+
+        const start_steps = self.steps;
+        const start_cycles = self.cpu.cycles;
+        const original_video = self.ppu.isPixelCaptureEnabled();
+        const original_audio = self.options.capture_audio;
+        defer {
+            self.ppu.setPixelCapture(original_video);
+            self.options.capture_audio = original_audio;
+        }
+        if (options.capture_audio) |capture_enabled| self.options.capture_audio = capture_enabled;
+
+        var completed: usize = 0;
+        var input_index: usize = 0;
+        while (completed < frame_count) {
+            while (input_index < inputs.len and inputs[input_index].frame_offset == completed) : (input_index += 1) {
+                self.setButtons(inputs[input_index].buttons);
+            }
+
+            const capture_frame = switch (options.video) {
+                .none => false,
+                .final_frame => completed + 1 == frame_count,
+                .every_frame => true,
+            };
+            self.ppu.setPixelCapture(capture_frame);
+
+            if (self.runUntilFrame(options.max_instructions_per_frame) == null) {
+                return .{
+                    .frames_completed = completed,
+                    .instructions = self.steps - start_steps,
+                    .cycles = self.cpu.cycles - start_cycles,
+                    .timed_out = true,
+                };
+            }
+            completed += 1;
+        }
+
+        return .{
+            .frames_completed = completed,
+            .instructions = self.steps - start_steps,
+            .cycles = self.cpu.cycles - start_cycles,
+            .timed_out = false,
+        };
+    }
+
+    pub fn observe(self: *const Machine) Observation {
+        const lcdc = self.bus.io.getLcdc();
+        const background_offset: usize = if ((lcdc & 0x08) != 0) 0x1C00 else 0x1800;
+        const window_offset: usize = if ((lcdc & 0x40) != 0) 0x1C00 else 0x1800;
+        return .{
+            .cpu = .{
+                .af = self.cpu.af,
+                .bc = self.cpu.bc,
+                .de = self.cpu.de,
+                .hl = self.cpu.hl,
+                .sp = self.cpu.sp,
+                .pc = self.cpu.pc,
+                .ime = self.cpu.ime,
+                .halted = self.cpu.halted,
+                .cycles = self.cpu.cycles,
+            },
+            .instructions = self.steps,
+            .frames = self.frames,
+            .wram = &self.bus.wram,
+            .hram = &self.bus.hram,
+            .vram = &self.bus.vram,
+            .oam = &self.bus.oam,
+            .background_tilemap = self.bus.vram[background_offset..][0..0x400],
+            .window_tilemap = self.bus.vram[window_offset..][0..0x400],
+            .frame_buffer = &self.ppu.frame_buffer,
+        };
+    }
+
     pub fn setButtons(self: *Machine, buttons: Buttons) void {
         var active_low: u8 = 0xFF;
         if (buttons.right) active_low &= ~@as(u8, 0x01);
@@ -244,7 +406,9 @@ pub const Machine = struct {
         self.cpu.reader_ctx = undefined;
 
         self.applyBusState(state.bus);
+        const capture_pixels = self.ppu.isPixelCaptureEnabled();
         self.ppu = state.ppu;
+        self.ppu.setPixelCapture(capture_pixels);
         self.steps = state.steps;
         self.frames = state.frames;
     }
@@ -494,4 +658,63 @@ test "machine forks share ROM and isolate mutable state" {
     branch.bus.wram[0] = 0x99;
     try std.testing.expectEqual(@as(u8, 0x42), parent.bus.wram[0]);
     try std.testing.expect(parent.observableDigest() != branch.observableDigest());
+}
+
+test "frame stepping can omit pixels without omitting hardware frames" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    @memset(&machine.ppu.frame_buffer, [_]ppu_mod.DmgColor{.Black} ** ppu_mod.SCREEN_WIDTH);
+    const timing_only = machine.stepFrames(1, .{
+        .video = .none,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!timing_only.timed_out);
+    try std.testing.expectEqual(@as(usize, 1), timing_only.frames_completed);
+    try std.testing.expect(std.mem.allEqual(
+        u8,
+        std.mem.asBytes(&machine.ppu.frame_buffer),
+        @intFromEnum(ppu_mod.DmgColor.Black),
+    ));
+
+    const observed = machine.stepFrames(1, .{
+        .video = .final_frame,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!observed.timed_out);
+    try std.testing.expectEqual(@as(usize, 1), observed.frames_completed);
+    try std.testing.expect(!std.mem.allEqual(
+        u8,
+        std.mem.asBytes(&machine.ppu.frame_buffer),
+        @intFromEnum(ppu_mod.DmgColor.Black),
+    ));
+}
+
+test "frame input timelines apply at deterministic boundaries" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    const inputs = [_]FrameInput{
+        .{ .frame_offset = 0, .buttons = .{ .a = true } },
+        .{ .frame_offset = 1, .buttons = .{ .right = true, .start = true } },
+    };
+    const result = try machine.stepFramesWithInputs(2, &inputs, .{
+        .video = .none,
+        .max_instructions_per_frame = 100_000,
+    });
+    try std.testing.expect(!result.timed_out);
+    try std.testing.expectEqual(@as(u8, 0x7E), machine.bus.io.getJoypadState());
+
+    const observation = machine.observe();
+    try std.testing.expectEqual(machine.frames, observation.frames);
+    try std.testing.expectEqual(machine.cpu.pc, observation.cpu.pc);
+    try std.testing.expectEqual(@as(usize, 0x400), observation.background_tilemap.len);
 }
