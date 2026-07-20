@@ -10,3 +10,4 @@ pub const Cartridge = @import("cartridge/cartridge.zig").Cartridge;
 pub const RomHeader = @import("cartridge/cartridge.zig").RomHeader;
 pub const Mbc = @import("memory/mbc.zig").Mbc;
 pub const MbcType = @import("memory/mbc.zig").MbcType;
+pub const MachineBatch = @import("batch.zig").MachineBatch;

@@ -4,6 +4,7 @@ const bench_cli = @import("bench_cli.zig");
 
 const dmg_clock_hz = 4_194_304.0;
 const fork_count = 1_000;
+const parallel_instruction_limit = 1_000_000;
 
 const help_text =
     \\Usage: zig build bench -Doptimize=ReleaseFast -- [OPTIONS] <ROM_FILE>
@@ -89,6 +90,24 @@ pub fn main(init: std.process.Init) !void {
     const fork_seconds = @as(f64, @floatFromInt(fork_finish - fork_start)) / std.time.ns_per_s;
     const forks_per_second = fork_count / fork_seconds;
 
+    const logical_cpus = std.Thread.getCpuCount() catch 1;
+    const batch_count = @min(@max(logical_cpus * 2, 2), 32);
+    var batch = try nibble.MachineBatch.initForked(init.gpa, &machine, batch_count);
+    defer batch.deinit();
+    const parallel_instructions = @min(options.steps, parallel_instruction_limit);
+    const batch_start_cycles = batch.machines[0].cpu.cycles;
+    const batch_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    try batch.runInstructionsParallel(init.io, parallel_instructions);
+    const batch_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const batch_seconds = @as(f64, @floatFromInt(batch_finish - batch_start)) / std.time.ns_per_s;
+    const batch_cycles_per_machine = batch.machines[0].cpu.cycles - batch_start_cycles;
+    const aggregate_cycles = batch_cycles_per_machine * batch_count;
+    const aggregate_cycles_per_second = @as(f64, @floatFromInt(aggregate_cycles)) / batch_seconds;
+    const batch_digest = batch.machines[0].observableDigest();
+    for (batch.machines[1..]) |*branch| {
+        if (branch.observableDigest() != batch_digest) return error.BatchStateMismatch;
+    }
+
     try stdout.print("Nibble headless benchmark\n", .{});
     try stdout.print("  ROM: {s} ({s})\n", .{
         cartridge_info.header.getTitle(),
@@ -108,6 +127,14 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("  Forks/s: {d:.3} ({d} byte snapshot)\n", .{
         forks_per_second,
         @sizeOf(nibble.Snapshot),
+    });
+    try stdout.print("  Batch: {d} machines x {d} instructions\n", .{
+        batch_count,
+        parallel_instructions,
+    });
+    try stdout.print("  Aggregate T-cycles/s: {d:.3} ({d:.2} realtime machines)\n", .{
+        aggregate_cycles_per_second,
+        aggregate_cycles_per_second / dmg_clock_hz,
     });
     try stdout.flush();
 }
