@@ -6,6 +6,7 @@ pub const Options = struct {
     steps: usize = 10_000_000,
     warmup: usize = 1_000_000,
     trials: u8 = 5,
+    capture_video: bool = true,
     rom_path: ?[]const u8 = null,
 };
 
@@ -24,6 +25,7 @@ const params = clap.parseParamsComptime(
     \\-s, --steps <COUNT>    Instructions measured per trial
     \\-w, --warmup <COUNT>   Warmup instructions before measurement
     \\-t, --trials <TRIALS>  Trial count (1-21)
+    \\--no-video             Preserve PPU timing without framebuffer stores
     \\<ROM>...
     \\
 );
@@ -55,6 +57,7 @@ pub fn parse(allocator: std.mem.Allocator, args: []const []const u8) ParseError!
         .steps = result.args.steps orelse 10_000_000,
         .warmup = result.args.warmup orelse 1_000_000,
         .trials = result.args.trials orelse 5,
+        .capture_video = result.args.@"no-video" == 0,
         .rom_path = if (rom_paths.len == 1) rom_paths[0] else null,
     };
 }
@@ -71,11 +74,12 @@ fn parseTrials(text: []const u8) error{InvalidTrialCount}!u8 {
 
 test "benchmark CLI parses workload controls" {
     const options = try parse(std.testing.allocator, &.{
-        "--steps", "250", "--warmup=10", "--trials", "3", "game.gb",
+        "--steps", "250", "--warmup=10", "--trials", "3", "--no-video", "game.gb",
     });
     try std.testing.expectEqual(@as(usize, 250), options.steps);
     try std.testing.expectEqual(@as(usize, 10), options.warmup);
     try std.testing.expectEqual(@as(u8, 3), options.trials);
+    try std.testing.expect(!options.capture_video);
     try std.testing.expectEqualStrings("game.gb", options.rom_path.?);
 }
 

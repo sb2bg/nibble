@@ -87,6 +87,8 @@ zig build bench -Doptimize=ReleaseFast -- \
 The report includes instruction and T-cycle throughput, real-time factor,
 completed frames per second, and the deterministic digest. Use the same ROM,
 step count, Zig version, and host when comparing changes.
+Pass `--no-video` to benchmark timing-only PPU execution without framebuffer
+stores; the report always prints the active observation policy.
 
 ## Embedding the core
 

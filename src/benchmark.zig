@@ -19,6 +19,7 @@ const help_text =
     \\  -s, --steps <COUNT>    Instructions measured per trial (default 10000000)
     \\  -w, --warmup <COUNT>   Warmup instructions (default 1000000)
     \\  -t, --trials <TRIALS>  Trial count, 1-21 (default 5)
+    \\  --no-video             Preserve PPU timing without framebuffer stores
     \\
 ;
 
@@ -44,7 +45,10 @@ pub fn main(init: std.process.Init) !void {
         std.process.fatal("unable to load ROM '{s}': {s}", .{ rom_path, @errorName(err) });
     };
 
-    var machine = nibble.Machine.init(init.gpa, cartridge, .{ .capture_audio = false });
+    var machine = nibble.Machine.init(init.gpa, cartridge, .{
+        .capture_audio = false,
+        .capture_video = options.capture_video,
+    });
     defer machine.deinit();
     const initial = machine.capture();
 
@@ -155,6 +159,7 @@ pub fn main(init: std.process.Init) !void {
         options.trials,
         if (options.trials == 1) "" else "s",
     });
+    try stdout.print("  Video observation: {s}\n", .{if (options.capture_video) "every frame" else "timing only"});
     try stdout.print("  Median: {d:.3} s\n", .{seconds});
     try stdout.print("  Instructions/s: {d:.3}\n", .{instructions_per_second});
     try stdout.print("  T-cycles/s: {d:.3}\n", .{cycles_per_second});
