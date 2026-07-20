@@ -3,6 +3,7 @@ const nibble = @import("nibble");
 const bench_cli = @import("bench_cli.zig");
 
 const dmg_clock_hz = 4_194_304.0;
+const fork_count = 1_000;
 
 const help_text =
     \\Usage: zig build bench -Doptimize=ReleaseFast -- [OPTIONS] <ROM_FILE>
@@ -78,6 +79,16 @@ pub fn main(init: std.process.Init) !void {
     const frames_per_second = @as(f64, @floatFromInt(measured_frames)) / seconds;
     const cartridge_info = machine.inspectCartridge();
 
+    const fork_start = std.Io.Clock.awake.now(init.io).nanoseconds;
+    for (0..fork_count) |_| {
+        var branch = try machine.fork(init.gpa);
+        if (branch.observableDigest() != expected_digest.?) return error.ForkStateMismatch;
+        branch.deinit();
+    }
+    const fork_finish = std.Io.Clock.awake.now(init.io).nanoseconds;
+    const fork_seconds = @as(f64, @floatFromInt(fork_finish - fork_start)) / std.time.ns_per_s;
+    const forks_per_second = fork_count / fork_seconds;
+
     try stdout.print("Nibble headless benchmark\n", .{});
     try stdout.print("  ROM: {s} ({s})\n", .{
         cartridge_info.header.getTitle(),
@@ -94,6 +105,10 @@ pub fn main(init: std.process.Init) !void {
     try stdout.print("  Real-time factor: {d:.2}x\n", .{cycles_per_second / dmg_clock_hz});
     try stdout.print("  Completed frames/s: {d:.3}\n", .{frames_per_second});
     try stdout.print("  State digest: {X:0>16}\n", .{expected_digest.?});
+    try stdout.print("  Forks/s: {d:.3} ({d} byte snapshot)\n", .{
+        forks_per_second,
+        @sizeOf(nibble.Snapshot),
+    });
     try stdout.flush();
 }
 

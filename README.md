@@ -73,7 +73,8 @@ zig build run -- --mooneye-test path/to/acceptance/timer/div_write.gb
 
 `nibble-bench` measures the simulation core directly: it does not initialize
 SDL, pace frames, or mix host PCM samples. Every trial restores the same machine
-snapshot and verifies that it ends with the same observable-state digest.
+snapshot and verifies that it ends with the same observable-state digest. It
+also reports deterministic machine forks per second and current snapshot size.
 
 ```bash
 zig build bench -Doptimize=ReleaseFast -- \
@@ -96,14 +97,15 @@ Important automation operations include:
 
 - `step` and bounded `runUntilFrame` execution;
 - `setButtons` with an explicit, host-independent input state;
-- `capture` and `restore` for deterministic branches and replay;
+- `capture`, `restore`, and `fork` for deterministic branches and replay;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
 
-Snapshots currently contain a fixed-capacity cartridge-RAM image. That keeps
-restore ownership simple, but shared immutable ROMs and cheaper multi-instance
-fork storage remain follow-up work.
+Forks retain one atomically reference-counted immutable ROM allocation while
+owning independent hardware and cartridge-RAM state. Snapshots currently contain
+a fixed-capacity cartridge-RAM image; reducing that copy size remains follow-up
+work before very large in-memory search trees are practical.
 
 CLI options:
 - `-h`, `--help`: show help

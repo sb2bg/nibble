@@ -51,6 +51,12 @@ restore clears host output queues because queued serial text and PCM are effects
 not hardware state. The observable-state digest is a replay/regression identity,
 not a serialized save-state format or cryptographic hash.
 
+`Machine.fork` constructs an independent mutable machine from a snapshot while
+retaining the cartridge's immutable ROM allocation through an atomic reference
+count. Each branch owns its IO allocations, external cartridge RAM, mapper, and
+peripheral state, so branches may be scheduled on different workers after they
+are created.
+
 ## Accuracy model
 
 The shared clock is measured in T-cycles (4,194,304 per second on DMG). CPU bus
