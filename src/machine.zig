@@ -9,7 +9,8 @@ const Timer = @import("timer.zig").Timer;
 const Serial = @import("serial.zig").Serial;
 const apu_mod = @import("apu.zig");
 const Apu = apu_mod.Apu;
-const Mbc = @import("memory/mbc.zig").Mbc;
+const mbc_mod = @import("memory/mbc.zig");
+const Mbc = mbc_mod.Mbc;
 const ppu_mod = @import("ppu/ppu.zig");
 const Ppu = ppu_mod.Ppu;
 
@@ -25,6 +26,9 @@ pub const MachineOptions = struct {
     /// retains the complete PPU fetch/FIFO/timing path and only omits final
     /// palette-mapped framebuffer stores.
     capture_video: bool = true,
+
+    /// Optional deterministic power-on value for cartridges with an MBC3 RTC.
+    rtc_seed: ?mbc_mod.RtcSeed = null,
 };
 
 pub const MooneyeResult = enum {
@@ -67,6 +71,29 @@ pub const FrameInput = struct {
     frame_offset: usize,
     buttons: Buttons,
 };
+
+/// Input transition at an absolute emulated T-cycle. A transition that lands
+/// inside an instruction is applied between peripheral dots before execution
+/// continues, including before a bus read committed at that boundary.
+pub const CycleInput = struct {
+    cycle: u64,
+    buttons: Buttons,
+};
+
+pub const CycleStepResult = struct {
+    requested_cycle: u64,
+    reached_cycle: u64,
+    instructions: usize,
+};
+
+pub const ResetOptions = struct {
+    /// AI/research resets normally begin without battery-backed episode state.
+    clear_cartridge_ram: bool = true,
+    rtc_seed: mbc_mod.RtcSeed = .{},
+    buttons: Buttons = .{},
+};
+
+pub const RtcSeed = mbc_mod.RtcSeed;
 
 pub const CpuObservation = struct {
     af: u16,
@@ -161,6 +188,12 @@ pub const Snapshot = struct {
     frames: usize,
 };
 
+const CycleInputCursor = struct {
+    inputs: []const CycleInput,
+    index: usize = 0,
+    cycle: u64,
+};
+
 /// Frontend-free deterministic DMG simulation core.
 ///
 /// `Machine` owns emulated hardware and a cartridge, but no host clock,
@@ -182,6 +215,7 @@ pub const Machine = struct {
             .options = options,
         };
         machine.ppu.setPixelCapture(options.capture_video);
+        if (options.rtc_seed) |seed| machine.bus.cartridge.mbc.seedRtc(seed);
         return machine;
     }
 
@@ -203,6 +237,10 @@ pub const Machine = struct {
     /// emulated phase. The callback is an internal compatibility bridge; the
     /// public machine API itself has no host callbacks.
     pub fn step(self: *Machine) StepResult {
+        return self.stepWithCycleInputs(null);
+    }
+
+    fn stepWithCycleInputs(self: *Machine, cycle_inputs: ?*CycleInputCursor) StepResult {
         var clocked_cycles: u16 = 0;
         var frame_ready = false;
 
@@ -210,10 +248,11 @@ pub const Machine = struct {
             machine: *Machine,
             clocked: *u16,
             frame_ready: *bool,
+            cycle_inputs: ?*CycleInputCursor,
 
             fn tick(ptr: *anyopaque, cycles: u8) void {
                 const ctx: *@This() = @ptrCast(@alignCast(ptr));
-                ctx.machine.tickPeripherals(cycles, ctx.frame_ready);
+                ctx.machine.tickWithCycleInputs(cycles, ctx.frame_ready, ctx.cycle_inputs);
                 ctx.clocked.* +%= cycles;
             }
         };
@@ -221,6 +260,7 @@ pub const Machine = struct {
             .machine = self,
             .clocked = &clocked_cycles,
             .frame_ready = &frame_ready,
+            .cycle_inputs = cycle_inputs,
         };
         self.bus.setCycleHook(.{
             .context = @ptrCast(&hook_ctx),
@@ -231,7 +271,7 @@ pub const Machine = struct {
         const cycles = self.cpu.step(&self.bus);
         if (clocked_cycles < @as(u16, cycles)) {
             const remaining: u8 = @intCast(@as(u16, cycles) - clocked_cycles);
-            self.tickPeripherals(remaining, &frame_ready);
+            self.tickWithCycleInputs(remaining, &frame_ready, cycle_inputs);
         }
 
         self.steps += 1;
@@ -240,6 +280,39 @@ pub const Machine = struct {
 
     pub fn runInstructions(self: *Machine, count: usize) void {
         for (0..count) |_| _ = self.step();
+    }
+
+    /// Advance until at least `target_cycle`, applying sorted input transitions
+    /// at their exact T-cycle even when the final instruction overshoots it.
+    pub fn runUntilCycle(
+        self: *Machine,
+        target_cycle: u64,
+        inputs: []const CycleInput,
+    ) error{ CycleInPast, InputOutsideRange, UnsortedInputs }!CycleStepResult {
+        if (target_cycle < self.cpu.cycles) return error.CycleInPast;
+
+        var previous_cycle = self.cpu.cycles;
+        for (inputs, 0..) |input, index| {
+            if (input.cycle < self.cpu.cycles or input.cycle > target_cycle) {
+                return error.InputOutsideRange;
+            }
+            if (index != 0 and input.cycle < previous_cycle) return error.UnsortedInputs;
+            previous_cycle = input.cycle;
+        }
+
+        var cursor: CycleInputCursor = .{
+            .inputs = inputs,
+            .cycle = self.cpu.cycles,
+        };
+        self.applyCycleInputsAtCurrent(&cursor);
+        const start_steps = self.steps;
+        while (self.cpu.cycles < target_cycle) _ = self.stepWithCycleInputs(&cursor);
+
+        return .{
+            .requested_cycle = target_cycle,
+            .reached_cycle = self.cpu.cycles,
+            .instructions = self.steps - start_steps,
+        };
     }
 
     /// Run until the next completed video frame, bounded so a ROM that turns
@@ -369,6 +442,17 @@ pub const Machine = struct {
         self.frames = 0;
     }
 
+    /// Reinitialize an episode without consulting host time or retaining
+    /// accidental battery/RTC state from a prior run.
+    pub fn resetDeterministic(self: *Machine, options: ResetOptions) void {
+        self.reset();
+        if (options.clear_cartridge_ram) {
+            if (self.bus.cartridge.ram_data) |ram| @memset(ram, 0);
+        }
+        self.bus.cartridge.mbc.seedRtc(options.rtc_seed);
+        self.setButtons(options.buttons);
+    }
+
     pub fn capture(self: *const Machine) Snapshot {
         return .{
             .cpu = .{
@@ -483,6 +567,46 @@ pub const Machine = struct {
             self.cpu.h(),
             self.cpu.l(),
         });
+    }
+
+    fn applyCycleInputsAtCurrent(self: *Machine, cursor: *CycleInputCursor) void {
+        while (cursor.index < cursor.inputs.len and
+            cursor.inputs[cursor.index].cycle == cursor.cycle) : (cursor.index += 1)
+        {
+            self.setButtons(cursor.inputs[cursor.index].buttons);
+        }
+    }
+
+    fn tickWithCycleInputs(
+        self: *Machine,
+        cycles: u8,
+        frame_ready: *bool,
+        maybe_cursor: ?*CycleInputCursor,
+    ) void {
+        const cursor = maybe_cursor orelse {
+            self.tickPeripherals(cycles, frame_ready);
+            return;
+        };
+
+        var remaining = cycles;
+        while (cursor.index < cursor.inputs.len) {
+            const event_cycle = cursor.inputs[cursor.index].cycle;
+            const end_cycle = cursor.cycle + remaining;
+            if (event_cycle > end_cycle) break;
+
+            const prefix: u8 = @intCast(event_cycle - cursor.cycle);
+            if (prefix != 0) {
+                self.tickPeripherals(prefix, frame_ready);
+                cursor.cycle += prefix;
+                remaining -= prefix;
+            }
+            self.applyCycleInputsAtCurrent(cursor);
+        }
+
+        if (remaining != 0) {
+            self.tickPeripherals(remaining, frame_ready);
+            cursor.cycle += remaining;
+        }
     }
 
     fn tickPeripherals(self: *Machine, cycles: u8, frame_ready: *bool) void {
@@ -717,4 +841,48 @@ test "frame input timelines apply at deterministic boundaries" {
     try std.testing.expectEqual(machine.frames, observation.frames);
     try std.testing.expectEqual(machine.cpu.pc, observation.cpu.pc);
     try std.testing.expectEqual(@as(usize, 0x400), observation.background_tilemap.len);
+}
+
+test "cycle input timelines split instruction clocks at exact T-cycles" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    const inputs = [_]CycleInput{
+        .{ .cycle = 2, .buttons = .{ .a = true } },
+        .{ .cycle = 6, .buttons = .{ .start = true } },
+    };
+    const result = try machine.runUntilCycle(7, &inputs);
+    try std.testing.expectEqual(@as(u64, 7), result.requested_cycle);
+    try std.testing.expectEqual(@as(u64, 8), result.reached_cycle);
+    try std.testing.expectEqual(@as(usize, 2), result.instructions);
+    try std.testing.expectEqual(@as(u8, 0x7F), machine.bus.io.getJoypadState());
+}
+
+test "deterministic reset clears episode RAM and reseeds MBC3 time" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").rtcCartridge(std.testing.allocator),
+        .{ .rtc_seed = .{ .seconds = 12, .day = 4 } },
+    );
+    defer machine.deinit();
+
+    try std.testing.expectEqual(@as(u8, 12), machine.inspectCartridge().mapper.rtc.seconds);
+    machine.bus.cartridge.ram_data.?[3] = 0xCC;
+    machine.bus.cartridge.mbc.seedRtc(.{ .seconds = 59, .day = 8 });
+
+    machine.resetDeterministic(.{
+        .rtc_seed = .{ .minutes = 7, .day = 42, .cycle_accumulator = 99 },
+        .buttons = .{ .b = true },
+    });
+    const inspection = machine.inspectCartridge();
+    try std.testing.expectEqual(@as(u8, 0), machine.bus.cartridge.ram_data.?[3]);
+    try std.testing.expectEqual(@as(u8, 0), inspection.mapper.rtc.seconds);
+    try std.testing.expectEqual(@as(u8, 7), inspection.mapper.rtc.minutes);
+    try std.testing.expectEqual(@as(u9, 42), inspection.mapper.rtc.day);
+    try std.testing.expectEqual(@as(u32, 99), inspection.mapper.rtc.cycle_accumulator);
+    try std.testing.expectEqual(@as(u8, 0xDF), machine.bus.io.getJoypadState());
 }

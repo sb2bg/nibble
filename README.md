@@ -102,6 +102,10 @@ Important automation operations include:
 - `observe` for borrowed CPU, RAM, VRAM, OAM, tile-map, and framebuffer views;
 - `setButtons` and frame-boundary `FrameInput` timelines with explicit,
   host-independent input state;
+- `runUntilCycle` and `CycleInput` for transitions on exact emulated T-cycles,
+  including transitions inside a CPU instruction;
+- deterministic power-on RTC seeds and `resetDeterministic` for reproducible
+  episodes that optionally clear battery-backed cartridge RAM;
 - `capture`, `restore`, and `fork` for deterministic branches and replay;
 - `MachineBatch` for parallel instruction or bounded-frame advancement;
 - `peek` for observations that do not advance time or trigger CPU bus effects;

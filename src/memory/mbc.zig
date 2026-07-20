@@ -108,6 +108,18 @@ pub const Rtc = struct {
     }
 };
 
+/// Reproducible MBC3 clock state supplied by an environment at startup/reset.
+/// The sub-second phase is explicit so experiments can reproduce edges exactly.
+pub const RtcSeed = struct {
+    seconds: u8 = 0,
+    minutes: u8 = 0,
+    hours: u8 = 0,
+    day: u9 = 0,
+    halted: bool = false,
+    carry: bool = false,
+    cycle_accumulator: u32 = 0,
+};
+
 /// Memory-bank controller state and address translation.
 pub const Mbc = struct {
     /// Stable, read-only mapper state intended for debuggers, test harnesses,
@@ -180,6 +192,19 @@ pub const Mbc = struct {
         self.banking_mode = 0;
         self.rtc.latched_valid = false;
         self.rtc.last_latch_bit = 0;
+    }
+
+    pub fn seedRtc(self: *Mbc, seed: RtcSeed) void {
+        if (self.mbc_type != .mbc3 or !self.has_rtc) return;
+        self.rtc = .{
+            .seconds = seed.seconds % 60,
+            .minutes = seed.minutes % 60,
+            .hours = seed.hours % 24,
+            .day = seed.day,
+            .halted = seed.halted,
+            .carry = seed.carry,
+            .cycle_accumulator = seed.cycle_accumulator % RTC_CYCLES_PER_SECOND,
+        };
     }
 
     pub fn snapshot(self: *const Mbc) Snapshot {
@@ -411,4 +436,22 @@ test "MBC3 RTC advances from emulated cycles and honors halt" {
     mbc.rtc.cycle_accumulator = RTC_CYCLES_PER_SECOND - 4;
     mbc.tick(4);
     try std.testing.expectEqual(@as(u8, 1), mbc.rtc.seconds);
+}
+
+test "MBC3 RTC seeds normalize wall-clock fields and sub-second phase" {
+    var rom = [_]u8{0} ** 0x8000;
+    var mbc = Mbc.init(.mbc3, &rom, null, true);
+    mbc.seedRtc(.{
+        .seconds = 61,
+        .minutes = 62,
+        .hours = 25,
+        .day = 300,
+        .cycle_accumulator = RTC_CYCLES_PER_SECOND + 7,
+    });
+
+    try std.testing.expectEqual(@as(u8, 1), mbc.rtc.seconds);
+    try std.testing.expectEqual(@as(u8, 2), mbc.rtc.minutes);
+    try std.testing.expectEqual(@as(u8, 1), mbc.rtc.hours);
+    try std.testing.expectEqual(@as(u9, 300), mbc.rtc.day);
+    try std.testing.expectEqual(@as(u32, 7), mbc.rtc.cycle_accumulator);
 }

@@ -46,8 +46,12 @@ retain the fetcher, FIFOs, sprite arbitration, palette timing, and frame edges,
 while omitting framebuffer stores that the caller will not observe. `stepFrames`
 applies caller-owned input timelines at deterministic frame boundaries, and
 `observe` returns borrowed memory, tile-map, CPU, and framebuffer views without
-allocating. Similarly, a non-intrusive `peek` does not consume a bus cycle or
-cause CPU-only DMA/PPU arbitration side effects.
+allocating. Cycle-input timelines are split inside the CPU's bus hook, so an
+input transition can land on an exact T-cycle even when the enclosing
+instruction finishes later. MBC3 clocks are seeded from explicit emulated state,
+never host wall time, and deterministic episode resets may clear external RAM.
+Similarly, a non-intrusive `peek` does not consume a bus cycle or cause CPU-only
+DMA/PPU arbitration side effects.
 
 `Machine.Snapshot` captures component-owned state, while immutable ROM data and
 owned allocations remain in place. Any newly persistent hardware field should
