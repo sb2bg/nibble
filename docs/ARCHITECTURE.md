@@ -26,7 +26,8 @@ The research-runtime work strengthens the existing design instead of adding a
 second emulator path: observation policy, deterministic inputs/resets,
 snapshots, forks, batches, instrumentation, and the GUI inspector all compose
 around the same `Machine` scheduler. See [RESEARCH_RUNTIME.md](RESEARCH_RUNTIME.md)
-for the workload model, measured performance, and demo direction.
+for the workload model, measured performance, and demo direction, and
+[AGENT_RUNTIME.md](AGENT_RUNTIME.md) for the model-facing buffer contract.
 
 ## Component boundaries
 
@@ -55,6 +56,10 @@ for the workload model, measured performance, and demo direction.
   queued audio device, and management UI. It also owns presentation-only
   choices such as scaling, fullscreen state, mute, and color themes. It is
   optional; graphical and headless runs execute the same PPU and APU cores.
+- `agent.AgentRuntime` is a host composition layer. It owns a reusable branch
+  pool, accepts `std.Io`, schedules independent machines, and writes contiguous
+  model observations. It does not own hardware, rewards, episode semantics, or
+  a model framework.
 
 The public `nibble` module exports only frontend-independent pieces. A machine
 can be driven from a native application, benchmark, test runner, or future
@@ -101,6 +106,15 @@ single-frame, and observation-selective multi-frame operations share this
 partitioning. `stepFramesWithButtonsParallel` combines machine-ordered actions
 with a shared frame-repeat interval, while caller-provided result slices
 preserve machine order without allocating in the batch API.
+
+The agent layer adds decision-time concepts without moving them into
+`Machine`. `Action` defines button hold and release durations. `MachinePool`
+preallocates complete mutable machines and identifies live branches with a slot
+plus generation, rejecting stale IDs after reuse. `AgentRuntime` validates a
+whole request before mutation, prevents the same branch from entering two
+worker chunks, and encodes final frames directly into caller-owned batch
+storage. Its `std.Io` dependency is appropriate at this host boundary; the
+hardware core remains independent of host concurrency and process IO.
 
 `Debugger` is an optional execution adapter rather than a dependency of the
 machine core. It checks PC breakpoints before stepping, compares caller-selected

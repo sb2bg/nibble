@@ -20,6 +20,12 @@ The public Zig API provides a small set of composable operations:
 - `captureOwned`, `restoreOwned`, and `fork` support checkpoints,
   counterfactual branches, replay, and search trees. Forks share immutable ROM
   bytes but own independent mutable hardware and cartridge RAM.
+- `captureOwnedInto` refreshes a compact checkpoint without allocation, while
+  `MachinePool` restores generation-tagged branch slots from it and reuses
+  their mutable storage.
+- `AgentRuntime` executes heterogeneous hold/release macro-actions through an
+  injected `std.Io`, then writes raw palette or packed 2bpp frames into one
+  caller-owned model batch.
 - `MachineBatch.stepFramesWithButtonsParallel` applies one ordered action per
   environment and advances a shared action-repeat interval using Zig 0.16's
   `std.Io.Group` worker pool.
@@ -70,6 +76,17 @@ The defensible performance niche today is therefore:
 
 > high aggregate branch throughput with exact, inspectable, reproducible
 > hardware state—not the fastest single opaque game loop.
+
+The complete agent benchmark now sharpens that conclusion. On the same M1 Pro,
+128 preallocated Tetris environments sustain roughly 10,000 one-frame decisions
+per second and 13,000 aggregate frames per second at action repeat 8 with packed
+final-frame observations. Branch resets from a compact checkpoint are roughly
+750,000 per second, and packed observations measure close to timing-only runs.
+A local 9.0M-parameter CNN+GRU is faster than this in PyTorch MPS even when CPU
+`uint8` upload is included. For the first compact policy, accurate simulation
+is therefore the measured bottleneck; branch allocation and observation
+transport are not. See [AGENT_RUNTIME.md](AGENT_RUNTIME.md) for the exact model
+boundary and caveats.
 
 ## A demo with substance
 

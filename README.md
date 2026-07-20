@@ -96,6 +96,20 @@ The [research runtime notes](docs/RESEARCH_RUNTIME.md) explain the intended
 planning/training niche, current measured performance, accuracy tradeoffs, and
 a substantive counterfactual-search demo direction.
 
+The complete agent workload has its own benchmark:
+
+```bash
+zig build agent-bench -Doptimize=ReleaseFast -- \
+  --environments 128 --iterations 100 --warmup 4 \
+  "roms/Tetris (JUE) (V1.1) [!].gb"
+```
+
+It measures macro-actions, preallocated checkpoint branches, parallel stepping,
+contiguous raw or packed observations, a deterministic policy-boundary shim,
+and allocation-free branch resets. See [agent runtime and local visual
+models](docs/AGENT_RUNTIME.md) for the API, buffer formats, current M1 Pro
+crossover measurements, and the planned local PyTorch/MLX worker boundary.
+
 ## Embedding the core
 
 The public `nibble` module exports `Machine`, `Cartridge`, `Snapshot`, `Buttons`,
@@ -120,6 +134,9 @@ Important automation operations include:
 - `MachineBatch` for parallel instruction, bounded-frame, or multi-frame
   observation-selective advancement, machine-ordered heterogeneous actions,
   action repeat, and deterministic batch resets;
+- `agent.AgentRuntime` for generation-safe preallocated branch slots, temporal
+  hold/release actions, injected `std.Io` scheduling, and allocation-free
+  contiguous `palette_u8` or packed 2bpp model observations;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
@@ -204,6 +221,9 @@ implemented.
 - `src/machine.zig`: deterministic hardware scheduler and snapshots
 - `src/emulator.zig`: SDL/host adapter around `Machine`
 - `src/benchmark.zig`: reproducible headless benchmark executable
+- `src/agent/`: temporal actions, model observations, reusable branch pool,
+  and parallel agent runtime
+- `src/agent_benchmark.zig`: complete agent-workload benchmark executable
 - `src/cpu/`: CPU core + instruction decode/execute
 - `src/memory/`: memory bus, IO registers, and MBC logic
 - `src/ppu/`: PPU timing and rendering
@@ -213,6 +233,7 @@ implemented.
 - `src/sdl.zig`: minimal SDL2 bindings
 - `roms/`: local ROMs used for development/testing
 - `docs/ARCHITECTURE.md`: component ownership, timing model, and accuracy limits
+- `docs/AGENT_RUNTIME.md`: local visual-model boundary and buffer contract
 
 ## Notes
 
