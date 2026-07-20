@@ -74,15 +74,27 @@ pub const Timer = struct {
         }
     }
 
-    /// Advance by T-cycles. The emulator may call this in small batches; all
-    /// edge-sensitive behavior is still evaluated one T-cycle at a time.
+    /// Advance by T-cycles. Edge-sensitive intervals retain the dot loop; a
+    /// disabled timer with no pending reload is safe to advance as one batch.
     pub fn tick(self: *Timer, cycles: u8, io: *IoRegisters) void {
+        const tac = io.data[@intFromEnum(IoReg.TAC)];
+        if ((tac & 0x04) == 0 and self.reload_delay == 0) {
+            // With the programmable timer disconnected there can be no TIMA
+            // edge or delayed reload inside this batch. DIV is the high byte
+            // of the wrapping system counter, so the whole interval is one
+            // exact addition. `reloaded_this_cycle` describes only the final
+            // T-cycle and therefore becomes false just as in the dot loop.
+            self.reloaded_this_cycle = false;
+            self.system_counter +%= cycles;
+            io.data[@intFromEnum(IoReg.DIV)] = @truncate(self.system_counter >> 8);
+            return;
+        }
+
         var remaining = cycles;
         while (remaining > 0) : (remaining -= 1) {
             self.reloaded_this_cycle = false;
             self.tickReload(io);
 
-            const tac = io.data[@intFromEnum(IoReg.TAC)];
             const old_signal = self.timerSignal(tac);
             self.system_counter +%= 1;
             io.data[@intFromEnum(IoReg.DIV)] = @truncate(self.system_counter >> 8);
@@ -147,6 +159,20 @@ test "DIV reset can clock TIMA on a falling edge" {
 
     try std.testing.expectEqual(@as(u16, 0), timer.system_counter);
     try std.testing.expectEqual(@as(u8, 1), io.data[@intFromEnum(IoReg.TIMA)]);
+}
+
+test "disabled timer batches preserve wrapping DIV state" {
+    var io = IoRegisters.init(std.testing.allocator);
+    defer io.deinit();
+    var timer = Timer.init();
+    timer.system_counter = 0xFFF8;
+    timer.reloaded_this_cycle = true;
+    io.data[@intFromEnum(IoReg.TAC)] = 0xF8;
+
+    timer.tick(16, &io);
+    try std.testing.expectEqual(@as(u16, 8), timer.system_counter);
+    try std.testing.expectEqual(@as(u8, 0), io.data[@intFromEnum(IoReg.DIV)]);
+    try std.testing.expect(!timer.reloaded_this_cycle);
 }
 
 test "TIMA reload and interrupt occur four T-cycles after overflow" {
