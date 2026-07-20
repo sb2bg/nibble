@@ -12,6 +12,7 @@ pub const observation = @import("observation.zig");
 pub const BranchId = @import("pool.zig").BranchId;
 pub const MachinePool = @import("pool.zig").MachinePool;
 pub const AgentRuntime = @import("runtime.zig").AgentRuntime;
+pub const runtime = @import("runtime.zig");
 pub const RuntimeInitOptions = @import("runtime.zig").InitOptions;
 pub const RuntimeStepOptions = @import("runtime.zig").StepOptions;
 pub const RuntimeStepBuffers = @import("runtime.zig").StepBuffers;

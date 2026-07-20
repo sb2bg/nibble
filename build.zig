@@ -78,6 +78,21 @@ pub fn build(b: *std.Build) void {
     const benchmark_step = b.step("bench", "Benchmark the frontend-free simulation core");
     benchmark_step.dependOn(&run_benchmark.step);
 
+    const agent_benchmark = b.addExecutable(.{
+        .name = "nibble-agent-bench",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_benchmark.root_module.addImport("nibble", core_module);
+    agent_benchmark.root_module.addImport("clap", clap.module("clap"));
+    const run_agent_benchmark = b.addRunArtifact(agent_benchmark);
+    if (b.args) |args| run_agent_benchmark.addArgs(args);
+    const agent_benchmark_step = b.step("agent-bench", "Benchmark the complete agent workload");
+    agent_benchmark_step.dependOn(&run_agent_benchmark.step);
+
     // Creates a step for unit testing. This only builds the test executable
     // but does not run it.
     const exe_unit_tests = b.addTest(.{
@@ -111,6 +126,17 @@ pub fn build(b: *std.Build) void {
     });
     const run_core_unit_tests = b.addRunArtifact(core_unit_tests);
 
+    const agent_benchmark_unit_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/agent_benchmark.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    agent_benchmark_unit_tests.root_module.addImport("nibble", core_module);
+    agent_benchmark_unit_tests.root_module.addImport("clap", clap.module("clap"));
+    const run_agent_benchmark_unit_tests = b.addRunArtifact(agent_benchmark_unit_tests);
+
     // Similar to creating the run step earlier, this exposes a `test` step to
     // the `zig build --help` menu, providing a way for the user to request
     // running the unit tests.
@@ -118,6 +144,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_unit_tests.step);
     test_step.dependOn(&run_benchmark_unit_tests.step);
     test_step.dependOn(&run_core_unit_tests.step);
+    test_step.dependOn(&run_agent_benchmark_unit_tests.step);
 
     // SDL dependency for graphics and input
     // Use system compiler to avoid Zig's C frontend issues with ARM NEON headers
