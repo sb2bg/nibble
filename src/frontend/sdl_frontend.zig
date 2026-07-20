@@ -2,6 +2,8 @@ const std = @import("std");
 const sdl = @import("../sdl.zig");
 const ppu_mod = @import("../ppu/ppu.zig");
 const DmgColor = ppu_mod.DmgColor;
+const apu_mod = @import("../apu.zig");
+const StereoSample = apu_mod.StereoSample;
 const SCREEN_WIDTH = ppu_mod.SCREEN_WIDTH;
 const SCREEN_HEIGHT = ppu_mod.SCREEN_HEIGHT;
 
@@ -10,6 +12,8 @@ const VIEWPORT_X = 16;
 const VIEWPORT_Y = 12;
 const LOGICAL_WIDTH = SCREEN_WIDTH + VIEWPORT_X * 2;
 const LOGICAL_HEIGHT = SCREEN_HEIGHT + VIEWPORT_Y * 2;
+const AUDIO_BATCH_SAMPLES = 128;
+const MAX_QUEUED_AUDIO_BYTES = apu_mod.SAMPLE_RATE * @sizeOf(StereoSample) / 10;
 
 const Palette = struct {
     name: []const u8,
@@ -31,6 +35,7 @@ pub const UiActions = struct {
     load_state: bool = false,
     prev_slot: bool = false,
     next_slot: bool = false,
+    toggle_mute: bool = false,
     redraw: bool = false,
 };
 
@@ -40,6 +45,8 @@ pub const SdlFrontend = struct {
     window: *sdl.Window,
     renderer: *sdl.Renderer,
     texture: *sdl.Texture,
+    audio_device: ?sdl.AudioDeviceId = null,
+    audio_muted: bool = false,
 
     ui_paused: bool = false,
     ui_slot: u8 = 0,
@@ -56,6 +63,7 @@ pub const SdlFrontend = struct {
     prev_quit_key: bool = false,
     prev_palette_key: bool = false,
     prev_fullscreen_key: bool = false,
+    prev_mute_key: bool = false,
     palette_index: usize = 0,
     fullscreen: bool = false,
 
@@ -105,16 +113,23 @@ pub const SdlFrontend = struct {
             return error.SdlTextureFailed;
         };
 
+        const audio_device = initAudio() catch |err| blk: {
+            std.debug.print("Warning: SDL audio unavailable ({s}): {s}\n", .{ @errorName(err), sdl.getError() });
+            break :blk null;
+        };
+
         var frontend: SdlFrontend = .{
             .window = window,
             .renderer = renderer,
             .texture = texture,
+            .audio_device = audio_device,
         };
         frontend.refreshWindowTitle();
         return frontend;
     }
 
     pub fn deinit(self: *SdlFrontend) void {
+        if (self.audio_device) |device| sdl.closeAudioDevice(device);
         sdl.destroyTexture(self.texture);
         sdl.destroyRenderer(self.renderer);
         sdl.destroyWindow(self.window);
@@ -180,6 +195,7 @@ pub const SdlFrontend = struct {
             actions.load_state = edgePressed(&self.prev_load_key, isPressed(keys, sdl.SCANCODE_F9));
             actions.prev_slot = edgePressed(&self.prev_prev_slot_key, isPressed(keys, sdl.SCANCODE_LEFTBRACKET));
             actions.next_slot = edgePressed(&self.prev_next_slot_key, isPressed(keys, sdl.SCANCODE_RIGHTBRACKET));
+            actions.toggle_mute = edgePressed(&self.prev_mute_key, isPressed(keys, sdl.SCANCODE_M));
 
             if (edgePressed(&self.prev_palette_key, isPressed(keys, sdl.SCANCODE_C))) {
                 self.palette_index = (self.palette_index + 1) % palettes.len;
@@ -202,6 +218,7 @@ pub const SdlFrontend = struct {
             self.prev_next_slot_key = false;
             self.prev_palette_key = false;
             self.prev_fullscreen_key = false;
+            self.prev_mute_key = false;
         }
 
         return actions;
@@ -224,6 +241,10 @@ pub const SdlFrontend = struct {
         }
 
         self.ui_paused = paused;
+        if (self.audio_device) |device| {
+            if (paused) sdl.clearQueuedAudio(device);
+            sdl.pauseAudioDevice(device, paused or self.audio_muted);
+        }
         self.ui_slot = slot;
         self.ui_slot_has_state = slot_has_state;
         self.ui_message_len = message_len;
@@ -238,21 +259,55 @@ pub const SdlFrontend = struct {
         self.present(frame);
     }
 
+    pub fn audioBatchReady(self: *const SdlFrontend, sample_count: usize) bool {
+        _ = self;
+        return sample_count >= AUDIO_BATCH_SAMPLES;
+    }
+
+    /// Queue emulated PCM without letting host stalls accumulate input lag.
+    /// Dropping an overfull batch is preferable to playing stale audio later.
+    pub fn queueAudio(self: *SdlFrontend, samples: []const StereoSample) void {
+        const device = self.audio_device orelse return;
+        if (self.audio_muted or self.ui_paused) return;
+        if (sdl.queuedAudioSize(device) >= MAX_QUEUED_AUDIO_BYTES) return;
+        sdl.queueAudio(device, std.mem.sliceAsBytes(samples)) catch {};
+    }
+
+    pub fn toggleAudioMute(self: *SdlFrontend) bool {
+        self.audio_muted = !self.audio_muted;
+        if (self.audio_device) |device| {
+            sdl.clearQueuedAudio(device);
+            sdl.pauseAudioDevice(device, self.audio_muted or self.ui_paused);
+        }
+        self.refreshWindowTitle();
+        return self.audio_muted;
+    }
+
+    pub fn clearAudioQueue(self: *SdlFrontend) void {
+        if (self.audio_device) |device| sdl.clearQueuedAudio(device);
+    }
+
     fn refreshWindowTitle(self: *SdlFrontend) void {
-        var title_buf: [128:0]u8 = undefined;
+        var title_buf: [192:0]u8 = undefined;
         const state = if (self.ui_paused) "Paused" else "Running";
         const slot_state = if (self.ui_slot_has_state) "set" else "empty";
+        const audio_state = if (self.audio_device == null)
+            "Audio unavailable"
+        else if (self.audio_muted)
+            "Audio muted"
+        else
+            "Audio on";
         const title = if (self.ui_message_len > 0)
             std.fmt.bufPrintZ(
                 &title_buf,
-                "Nibble | {s} | {s} | Slot {d} {s} | {s}",
-                .{ state, palettes[self.palette_index].name, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
+                "Nibble | {s} | {s} | {s} | Slot {d} {s} | {s}",
+                .{ state, palettes[self.palette_index].name, audio_state, self.ui_slot, slot_state, self.ui_message[0..self.ui_message_len] },
             ) catch "Nibble"
         else
             std.fmt.bufPrintZ(
                 &title_buf,
-                "Nibble | {s} | {s} | Slot {d} {s}",
-                .{ state, palettes[self.palette_index].name, self.ui_slot, slot_state },
+                "Nibble | {s} | {s} | {s} | Slot {d} {s}",
+                .{ state, palettes[self.palette_index].name, audio_state, self.ui_slot, slot_state },
             ) catch "Nibble";
 
         sdl.setWindowTitle(self.window, title);
@@ -272,3 +327,21 @@ pub const SdlFrontend = struct {
         return palettes[self.palette_index].colors[@intFromEnum(color)];
     }
 };
+
+fn initAudio() !sdl.AudioDeviceId {
+    try sdl.initSubSystem(sdl.INIT_AUDIO);
+    const desired: sdl.AudioSpec = .{
+        .freq = apu_mod.SAMPLE_RATE,
+        .format = sdl.AUDIO_S16LSB,
+        .channels = 2,
+        .silence = 0,
+        .samples = 512,
+        .padding = 0,
+        .size = 0,
+        .callback = null,
+        .userdata = null,
+    };
+    const device = try sdl.openAudioDevice(&desired);
+    sdl.pauseAudioDevice(device, false);
+    return device;
+}

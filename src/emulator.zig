@@ -298,9 +298,17 @@ pub const Emulator = struct {
         const divider_start = self.bus.timer.system_counter;
         self.bus.tickTimer(cycles);
         self.bus.tickApu(cycles, divider_start);
-        // Until the host audio adapter consumes these frames, discard them so
-        // the fixed-size handoff buffer never changes emulation behavior.
-        self.bus.apu.discardSamples();
+        const pending_audio = self.bus.apu.pendingSamples();
+        if (self.frontend) |*frontend| {
+            if (frontend.audioBatchReady(pending_audio.len)) {
+                frontend.queueAudio(pending_audio);
+                self.bus.apu.discardSamples();
+            }
+        } else {
+            // Audio generation remains deterministic in headless mode, but no
+            // host-side queue exists to consume the samples.
+            self.bus.apu.discardSamples();
+        }
         self.bus.tickSerial(cycles);
         self.bus.tickDma(cycles);
         self.bus.cartridge.mbc.tick(cycles);
@@ -360,6 +368,12 @@ pub const Emulator = struct {
         if (actions.toggle_pause) {
             self.paused = !self.paused;
             self.setStatusMessage(if (self.paused) "PAUSED" else "RUNNING");
+        }
+        if (actions.toggle_mute) {
+            if (self.frontend) |*frontend| {
+                const muted = frontend.toggleAudioMute();
+                self.setStatusMessage(if (muted) "AUDIO MUTED" else "AUDIO ON");
+            }
         }
         if (actions.reset) {
             self.reset();
@@ -443,7 +457,10 @@ pub const Emulator = struct {
         self.applyBusState(slot_state.bus);
 
         self.ppu = slot_state.ppu;
-        if (self.frontend) |*frontend| frontend.redraw(&self.ppu.frame_buffer);
+        if (self.frontend) |*frontend| {
+            frontend.clearAudioQueue();
+            frontend.redraw(&self.ppu.frame_buffer);
+        }
 
         self.steps = slot_state.steps;
         self.paused = false;
@@ -536,6 +553,7 @@ pub const Emulator = struct {
         self.cpu.reset();
         self.bus.reset();
         self.ppu.reset();
+        if (self.frontend) |*frontend| frontend.clearAudioQueue();
         self.next_frame_deadline_ns = 0;
         self.steps = 0;
         self.paused = false;

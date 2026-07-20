@@ -5,6 +5,7 @@ const std = @import("std");
 pub const Window = opaque {};
 pub const Renderer = opaque {};
 pub const Texture = opaque {};
+pub const AudioDeviceId = u32;
 
 pub const Rect = extern struct {
     x: c_int,
@@ -19,6 +20,18 @@ pub const Event = extern struct {
     padding: [52]u8 = undefined,
 };
 
+pub const AudioSpec = extern struct {
+    freq: c_int,
+    format: u16,
+    channels: u8,
+    silence: u8,
+    samples: u16,
+    padding: u16,
+    size: u32,
+    callback: ?*const anyopaque,
+    userdata: ?*anyopaque,
+};
+
 // Event types
 pub const QUIT = 0x100;
 pub const KEYDOWN = 0x300;
@@ -27,6 +40,10 @@ pub const KEYUP = 0x301;
 // Init flags
 pub const INIT_VIDEO: u32 = 0x00000020;
 pub const INIT_AUDIO: u32 = 0x00000010;
+
+// Native-endian signed 16-bit PCM. Nibble currently targets SDL2 platforms
+// supported by Zig where the host is little-endian.
+pub const AUDIO_S16LSB: u16 = 0x8010;
 
 // Window flags
 pub const WINDOW_SHOWN: u32 = 0x00000004;
@@ -50,6 +67,7 @@ pub const WINDOWPOS_CENTERED: c_int = 0x2FFF0000;
 
 // SDL functions
 extern fn SDL_Init(flags: u32) c_int;
+extern fn SDL_InitSubSystem(flags: u32) c_int;
 extern fn SDL_Quit() void;
 extern fn SDL_GetError() [*:0]const u8;
 
@@ -76,6 +94,19 @@ extern fn SDL_GetKeyboardState(numkeys: ?*c_int) [*c]const u8;
 extern fn SDL_PumpEvents() void;
 extern fn SDL_SetHint(name: [*:0]const u8, value: [*:0]const u8) c_int;
 
+extern fn SDL_OpenAudioDevice(
+    device: ?[*:0]const u8,
+    iscapture: c_int,
+    desired: *const AudioSpec,
+    obtained: ?*AudioSpec,
+    allowed_changes: c_int,
+) AudioDeviceId;
+extern fn SDL_CloseAudioDevice(device: AudioDeviceId) void;
+extern fn SDL_PauseAudioDevice(device: AudioDeviceId, pause_on: c_int) void;
+extern fn SDL_QueueAudio(device: AudioDeviceId, data: *const anyopaque, len: u32) c_int;
+extern fn SDL_GetQueuedAudioSize(device: AudioDeviceId) u32;
+extern fn SDL_ClearQueuedAudio(device: AudioDeviceId) void;
+
 // Keyboard scancodes we map to DMG controls
 pub const SCANCODE_X: usize = 27; // A
 pub const SCANCODE_Z: usize = 29; // B
@@ -99,6 +130,7 @@ pub const SCANCODE_F5: usize = 62;
 pub const SCANCODE_F9: usize = 66;
 pub const SCANCODE_F11: usize = 68;
 pub const SCANCODE_C: usize = 6;
+pub const SCANCODE_M: usize = 16;
 
 // Zig-friendly wrappers
 pub fn init(flags: u32) !void {
@@ -109,6 +141,10 @@ pub fn init(flags: u32) !void {
 
 pub fn quit() void {
     SDL_Quit();
+}
+
+pub fn initSubSystem(flags: u32) !void {
+    if (SDL_InitSubSystem(flags) < 0) return error.SdlSubSystemInitFailed;
 }
 
 pub fn getError() [:0]const u8 {
@@ -201,4 +237,32 @@ pub fn getKeyboardState() []const u8 {
 
 pub fn setHint(name: [:0]const u8, value: [:0]const u8) bool {
     return SDL_SetHint(name.ptr, value.ptr) != 0;
+}
+
+pub fn openAudioDevice(desired: *const AudioSpec) !AudioDeviceId {
+    const device = SDL_OpenAudioDevice(null, 0, desired, null, 0);
+    return if (device == 0) error.SdlAudioDeviceFailed else device;
+}
+
+pub fn closeAudioDevice(device: AudioDeviceId) void {
+    SDL_CloseAudioDevice(device);
+}
+
+pub fn pauseAudioDevice(device: AudioDeviceId, paused: bool) void {
+    SDL_PauseAudioDevice(device, @intFromBool(paused));
+}
+
+pub fn queueAudio(device: AudioDeviceId, bytes: []const u8) !void {
+    if (bytes.len == 0) return;
+    if (SDL_QueueAudio(device, bytes.ptr, @intCast(bytes.len)) < 0) {
+        return error.SdlQueueAudioFailed;
+    }
+}
+
+pub fn queuedAudioSize(device: AudioDeviceId) u32 {
+    return SDL_GetQueuedAudioSize(device);
+}
+
+pub fn clearQueuedAudio(device: AudioDeviceId) void {
+    SDL_ClearQueuedAudio(device);
 }
