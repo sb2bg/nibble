@@ -2,8 +2,8 @@
 
 Nibble is organized around hardware ownership rather than around opcode or UI
 features. The `Emulator` is the scheduler: the CPU advances the bus in T-cycles,
-and the scheduler advances the PPU, timer, DMA engine, and cartridge clock by the
-same amount.
+and the scheduler advances the PPU, timer, APU, DMA engine, and cartridge clock
+by the same amount.
 
 ## Component boundaries
 
@@ -16,6 +16,9 @@ same amount.
   routes DIV/TIMA/TMA/TAC writes to it so there is one source of timer state.
 - `Serial` owns link-transfer progress. The bus routes SC writes to it and
   advances the 8,192 Hz DMG internal clock alongside the other peripherals.
+- `Apu` owns `FF10-FF3F`, the four channel generators, frame sequencer, length,
+  envelope and sweep units, DMG wave-RAM arbitration, and the PCM handoff
+  buffer. It observes the timer's hidden counter but does not own host audio.
 - `IoRegisters` owns memory-mapped register values and register-local behavior.
   It also owns the combined edge-triggered STAT line and selected joypad lines.
 - `Mbc` owns mapper registers, address translation, MBC2 internal nibble RAM,
@@ -24,10 +27,10 @@ same amount.
 - `Ppu` owns dot timing, background/window fetch state, pixel FIFOs,
   window-line state, and the logical DMG frame buffer. It emits a frame-ready
   edge but has no dependency on SDL or host input.
-- `SdlFrontend` owns the host window, texture conversion, keyboard mapping, and
-  management UI. It also owns presentation-only choices such as scaling,
-  fullscreen state, and color themes. It is optional; graphical and headless
-  runs execute the same PPU core.
+- `SdlFrontend` owns the host window, texture conversion, keyboard mapping,
+  queued audio device, and management UI. It also owns presentation-only
+  choices such as scaling, fullscreen state, mute, and color themes. It is
+  optional; graphical and headless runs execute the same PPU and APU cores.
 
 Save states snapshot component-owned state, while immutable ROM data and owned
 allocations remain in place. Any newly persistent hardware field should be added
@@ -61,6 +64,12 @@ Implemented timing details include:
 - cycle-driven MBC3 RTC state, making emulation and save states deterministic.
 - eight-bit internal-clock serial transfers over 4,096 dots, including visible
   SB shifts, SC completion, disconnected-high input, and the serial interrupt.
+- DIV-APU falling-edge frame sequencing with hardware length, envelope, and
+  sweep cadence, including DIV-write clocks and DMG power-off length behavior;
+- all four DMG audio generators, NR50/NR51 stereo routing, DAC power gating,
+  wave-RAM access windows, and channel-3 retrigger corruption; and
+- fixed-rate 48 kHz PCM generation with a high-pass filter and a bounded SDL
+  queue that cannot feed host timing back into the emulated clock.
 
 ## Deliberate approximations
 
@@ -71,7 +80,10 @@ some background/object fetcher arbitration therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
 External serial transfers wait for a clock indefinitely because link partners
-are not implemented. STOP is a low-power approximation, and the APU is absent.
+are not implemented. STOP is a low-power approximation. The APU's digital
+timing is hardware-tested, while the final analog stage deliberately uses a
+linear per-channel mix rather than board-revision-specific nonlinear transfer
+functions and capacitor characteristics.
 
 These references define the current fidelity targets:
 
@@ -81,8 +93,11 @@ These references define the current fidelity targets:
 - [Pan Docs: rendering](https://gbdev.io/pandocs/Rendering.html)
 - [Pan Docs: interrupt sources and STAT blocking](https://gbdev.io/pandocs/Interrupt_Sources.html)
 - [Pan Docs: serial data transfer](https://gbdev.io/pandocs/Serial_Data_Transfer_%28Link_Cable%29.html)
+- [Pan Docs: audio](https://gbdev.io/pandocs/Audio.html) and
+  [audio registers](https://gbdev.io/pandocs/Audio_Registers.html)
 - [Pan Docs: MBC1](https://gbdev.io/pandocs/MBC1.html), [MBC2](https://gbdev.io/pandocs/MBC2.html), and [MBC3](https://gbdev.io/pandocs/MBC3.html)
 - [Mooneye Test Suite](https://github.com/Gekkio/mooneye-test-suite), whose 62
   applicable DMG acceptance ROMs form the hardware-timing baseline.
 - [Blargg's Game Boy test ROMs](https://github.com/retrio/gb-test-roms), used
-  for CPU, instruction, memory, and OAM-corruption regression coverage.
+  for CPU, instruction, memory, OAM-corruption, and DMG-audio regression
+  coverage.

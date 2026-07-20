@@ -21,12 +21,16 @@ Implemented core pieces:
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
 - Cycle-driven DMG serial transfers with completion interrupts
+- Four-channel DMG APU with sweep, envelopes, length counters, wave RAM, and
+  divider-driven frame sequencing
+- Buffered 48 kHz stereo SDL audio with pause-safe queueing and mute control
 
 Known gaps:
-- No audio/APU emulation
 - `STOP` instruction behavior is only partially modeled
 - Object fetch cancellation and fetcher arbitration are still approximate
 - External-clock serial transfers have no link-partner implementation
+- The analog audio path uses a practical linear mixer and high-pass filter;
+  individual DMG board revisions have additional nonlinear characteristics
 
 ## Requirements
 
@@ -84,9 +88,11 @@ Management hotkeys (SDL mode):
 - `F9`: load state from active slot
 - `[ / ]`: previous/next save slot
 - `C`: cycle Classic, Pocket, Mono, and Amber palettes
+- `M`: mute/unmute audio
 - `F11`: toggle fullscreen
 - `Esc`: quit
-- Window title: shows run/pause state, active slot, and the last status message
+- Window title: shows run/pause state, palette, audio state, active slot, and
+  the last status message
 
 Save state notes:
 - Save states are currently in-memory only (session-local, not persisted to disk).
@@ -108,10 +114,11 @@ The current DMG validation baseline passes:
 - 62 applicable Mooneye acceptance ROMs (excluding boot-state and non-DMG-model variants);
 - all 11 `blargg/cpu_instrs` cases;
 - `blargg/instr_timing` and both three-part memory-timing suites; and
-- all eight `blargg/oam_bug` cases.
+- all eight `blargg/oam_bug` cases; and
+- all 12 individual `blargg/dmg_sound` cases.
 
-The `dmg_sound` and `cgb_sound` suites are not part of that baseline because
-audio/APU and CGB hardware are not implemented.
+The `cgb_sound` suite is outside the baseline because CGB hardware is not
+implemented.
 
 ## Project layout
 
@@ -120,6 +127,7 @@ audio/APU and CGB hardware are not implemented.
 - `src/cpu/`: CPU core + instruction decode/execute
 - `src/memory/`: memory bus, IO registers, and MBC logic
 - `src/ppu/`: PPU timing and rendering
+- `src/apu.zig`: DMG audio registers, channel timing, mixing, and PCM handoff
 - `src/frontend/`: optional host presentation and input adapters
 - `src/timer.zig`: timer/divider logic
 - `src/sdl.zig`: minimal SDL2 bindings
