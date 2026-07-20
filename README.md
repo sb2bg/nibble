@@ -92,6 +92,10 @@ step count, Zig version, and host when comparing changes.
 Pass `--no-video` to benchmark timing-only PPU execution without framebuffer
 stores; the report always prints the active observation policy.
 
+The [research runtime notes](docs/RESEARCH_RUNTIME.md) explain the intended
+planning/training niche, current measured performance, accuracy tradeoffs, and
+a substantive counterfactual-search demo direction.
+
 ## Embedding the core
 
 The public `nibble` module exports `Machine`, `Cartridge`, `Snapshot`, `Buttons`,

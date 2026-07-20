@@ -6,6 +6,28 @@ T-cycles, and the scheduler advances the PPU, timer, APU, DMA engine, serial
 engine, and cartridge clock by the same amount. `Emulator` is an application
 adapter that owns SDL, host clocks, frame pacing, pause state, and UI save slots.
 
+## Assessment
+
+The architecture is strong at its boundaries: deterministic hardware is owned
+below `Machine`; host IO and policy stay in `Emulator`; the debugger wraps
+rather than infects the interpreter; and immutable ROM ownership is separate
+from branch-local mutable state. Those choices make headless embedding,
+snapshots, parallel machines, and the SDL application share one hardware core.
+
+Its main weakness is inside the performance/fidelity boundary. CPU bus timing
+uses an indirect cycle hook, and the dot PPU has enough persistent microstate
+that it cannot safely jump across active rendering yet. The object fetcher also
+retains the approximations documented below. These are localized engineering
+debts rather than cross-layer coupling, but they prevent Nibble from claiming
+either cycle-perfect hardware or 100x single-machine speed today. Snapshot
+types are in-process state, not a versioned persistent file format.
+
+The research-runtime work strengthens the existing design instead of adding a
+second emulator path: observation policy, deterministic inputs/resets,
+snapshots, forks, batches, instrumentation, and the GUI inspector all compose
+around the same `Machine` scheduler. See [RESEARCH_RUNTIME.md](RESEARCH_RUNTIME.md)
+for the workload model, measured performance, and demo direction.
+
 ## Component boundaries
 
 - `Cpu` owns LR35902 register and interrupt-execution state. It reaches memory
