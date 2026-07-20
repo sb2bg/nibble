@@ -186,6 +186,17 @@ pub const Apu = struct {
         divider_start: u16,
         capture_samples: bool,
     ) void {
+        if (!capture_samples) {
+            self.tickWithoutPcm(cycles, divider_start);
+            return;
+        }
+
+        self.tickWithPcm(cycles, divider_start);
+    }
+
+    /// Reference dot loop used when PCM output is observable. Mixing may occur
+    /// between hardware events, so this path deliberately retains dot order.
+    fn tickWithPcm(self: *Apu, cycles: u8, divider_start: u16) void {
         var divider = divider_start;
         var remaining = cycles;
         while (remaining > 0) : (remaining -= 1) {
@@ -205,7 +216,95 @@ pub const Apu = struct {
             self.sample_accumulator += SAMPLE_RATE;
             if (self.sample_accumulator >= MASTER_CLOCK) {
                 self.sample_accumulator -= MASTER_CLOCK;
-                if (capture_samples) self.emitSample();
+                self.emitSample();
+            }
+        }
+    }
+
+    /// Headless simulations do not observe intermediate PCM samples. Advance
+    /// generator counters to the next DIV-APU edge in one batch, then clock the
+    /// frame sequencer at the same dot the reference path would. CPU-visible
+    /// wave RAM access still reflects whether the final dot fetched a byte.
+    fn tickWithoutPcm(self: *Apu, cycles: u8, divider_start: u16) void {
+        var divider = divider_start;
+        var remaining: u16 = cycles;
+
+        while (remaining != 0) {
+            const divider_phase = divider & 0x1FFF;
+            const until_frame_edge: u16 = 0x2000 - divider_phase;
+            const chunk = @min(remaining, until_frame_edge);
+
+            self.advanceGenerators(chunk);
+            const sample_total = self.sample_accumulator + @as(u32, chunk) * SAMPLE_RATE;
+            self.sample_accumulator = sample_total % MASTER_CLOCK;
+
+            divider +%= @intCast(chunk);
+            remaining -= chunk;
+            if (chunk == until_frame_edge) self.clockFrameSequencer();
+        }
+    }
+
+    fn advanceGenerators(self: *Apu, cycles: u16) void {
+        self.wave.access_window = false;
+        if (!self.powered) return;
+
+        self.advancePulse(&self.pulse1, self.pulseFrequency(1), cycles);
+        self.advancePulse(&self.pulse2, self.pulseFrequency(2), cycles);
+        self.advanceWave(cycles);
+        self.advanceNoise(cycles);
+    }
+
+    fn advancePulse(self: *Apu, pulse: *PulseChannel, frequency: u11, cycles: u16) void {
+        _ = self;
+        const first_event: u16 = if (pulse.timer == 0) 1 else pulse.timer;
+        if (cycles < first_event) {
+            pulse.timer -= @intCast(cycles);
+            return;
+        }
+
+        const period = pulsePeriod(frequency);
+        const after_first = cycles - first_event;
+        const events = 1 + after_first / period;
+        const tail = after_first % period;
+        pulse.timer = period - tail;
+        pulse.duty_step +%= @truncate(events);
+    }
+
+    fn advanceWave(self: *Apu, cycles: u16) void {
+        const first_event: u16 = if (self.wave.timer == 0) 1 else self.wave.timer;
+        if (cycles < first_event) {
+            self.wave.timer -= @intCast(cycles);
+            return;
+        }
+
+        const period = wavePeriod(self.waveFrequency());
+        const after_first = cycles - first_event;
+        const events = 1 + after_first / period;
+        const tail = after_first % period;
+        self.wave.timer = period - tail;
+        self.wave.sample_index +%= @truncate(events);
+        self.wave.accessed_byte = @truncate(self.wave.sample_index >> 1);
+        self.wave.sample_buffer = self.regs[regIndex(0x30) + self.wave.accessed_byte];
+        self.wave.access_window = tail == 0;
+    }
+
+    fn advanceNoise(self: *Apu, cycles: u16) void {
+        const first_event: u32 = if (self.noise.timer == 0) 1 else self.noise.timer;
+        if (cycles < first_event) {
+            self.noise.timer -= cycles;
+            return;
+        }
+
+        const period = noisePeriod(self.regs[regIndex(0x22)]);
+        const after_first: u32 = @as(u32, cycles) - first_event;
+        var events: u32 = 1 + after_first / period;
+        self.noise.timer = period - after_first % period;
+
+        while (events != 0) : (events -= 1) {
+            const feedback: u15 = @intFromBool((self.noise.lfsr & 1) == ((self.noise.lfsr >> 1) & 1));
+            self.noise.lfsr = (self.noise.lfsr >> 1) | (feedback << 14);
+            if ((self.regs[regIndex(0x22)] & 0x08) != 0) {
+                self.noise.lfsr = (self.noise.lfsr & ~@as(u15, 0x40)) | (feedback << 6);
             }
         }
     }
@@ -761,4 +860,48 @@ test "sample clock emits 48 kHz stereo frames" {
     apu.discardSamples();
     apu.tick(255, 0);
     try std.testing.expectEqual(@as(usize, 2), apu.pendingSamples().len);
+}
+
+test "headless event batches match the dot reference hardware state" {
+    var configured = Apu.init();
+    configured.write(0x26, 0);
+    configured.write(0x26, 0x80);
+    configured.write(0x10, 0x21);
+    configured.write(0x12, 0xF3);
+    configured.write(0x13, 0xF8);
+    configured.write(0x14, 0x87);
+    configured.write(0x17, 0xA2);
+    configured.write(0x18, 0xF4);
+    configured.write(0x19, 0x87);
+    configured.write(0x1A, 0x80);
+    configured.write(0x1C, 0x20);
+    configured.write(0x1D, 0xFC);
+    configured.write(0x1E, 0x87);
+    configured.write(0x21, 0x91);
+    configured.write(0x22, 0x09);
+    configured.write(0x23, 0x80);
+    for (0..16) |index| configured.write(@intCast(0x30 + index), @intCast(index * 13));
+
+    var fast = configured;
+    var reference = configured;
+    var divider: u16 = 0x1FF0;
+    const chunks = [_]u8{ 1, 2, 3, 4, 7, 16, 31, 64, 5, 127, 255 };
+
+    for (chunks) |cycles| {
+        fast.tickWithSampleCapture(cycles, divider, false);
+        reference.tickWithPcm(cycles, divider);
+        reference.discardSamples();
+        divider +%= cycles;
+
+        try std.testing.expectEqualSlices(u8, &reference.regs, &fast.regs);
+        try std.testing.expectEqualDeep(reference.pulse1, fast.pulse1);
+        try std.testing.expectEqualDeep(reference.pulse2, fast.pulse2);
+        try std.testing.expectEqualDeep(reference.wave, fast.wave);
+        try std.testing.expectEqualDeep(reference.noise, fast.noise);
+        try std.testing.expectEqual(reference.frame_step, fast.frame_step);
+        try std.testing.expectEqual(reference.sweep_shadow, fast.sweep_shadow);
+        try std.testing.expectEqual(reference.sweep_timer, fast.sweep_timer);
+        try std.testing.expectEqual(reference.sweep_enabled, fast.sweep_enabled);
+        try std.testing.expectEqual(reference.sample_accumulator, fast.sample_accumulator);
+    }
 }
