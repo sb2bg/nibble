@@ -9,7 +9,7 @@ const OwnedSnapshot = machine_mod.OwnedSnapshot;
 /// from being mistaken for a later branch that reuses the same storage.
 pub const BranchId = struct {
     slot: u32,
-    generation: u32,
+    generation: u64,
 };
 
 pub const Error = error{
@@ -25,7 +25,7 @@ pub const Error = error{
 pub const MachinePool = struct {
     allocator: Allocator,
     machines: []Machine,
-    generations: []u32,
+    generations: []u64,
     occupied: []bool,
     free_slots: []u32,
     free_count: usize,
@@ -40,7 +40,7 @@ pub const MachinePool = struct {
 
         const machines = try allocator.alloc(Machine, slot_count);
         errdefer allocator.free(machines);
-        const generations = try allocator.alloc(u32, slot_count);
+        const generations = try allocator.alloc(u64, slot_count);
         errdefer allocator.free(generations);
         const occupied = try allocator.alloc(bool, slot_count);
         errdefer allocator.free(occupied);
@@ -96,7 +96,7 @@ pub const MachinePool = struct {
     /// headless agent configuration and are therefore not included.
     pub fn estimatedMutableBytes(self: *const MachinePool) usize {
         return self.machines.len * (@sizeOf(Machine) + self.cartridge_ram_len) +
-            self.generations.len * @sizeOf(u32) +
+            self.generations.len * @sizeOf(u64) +
             self.occupied.len * @sizeOf(bool) +
             self.free_slots.len * @sizeOf(u32);
     }
