@@ -68,6 +68,15 @@ pub const Emulator = struct {
     pub fn run(self: *Emulator) void {
         self.running = true;
         self.paused = false;
+
+        // The automation path should be the core loop, not the interactive
+        // loop with a forest of always-false SDL and pacing checks. Debug mode
+        // intentionally retains the interactive loop's per-step reporting.
+        if (self.frontend == null and !self.options.debug) {
+            self.runHeadless();
+            return;
+        }
+
         self.last_ui_redraw_ns = std.Io.Clock.awake.now(self.io).nanoseconds;
         self.next_frame_deadline_ns = 0;
         if (self.status_message_len == 0) self.setStatusMessage("READY");
@@ -119,6 +128,31 @@ pub const Emulator = struct {
 
             if (self.options.mooneye_test and self.mooneyeResult() != null) break;
             self.step();
+        }
+    }
+
+    fn runHeadless(self: *Emulator) void {
+        while (self.running) {
+            if (self.options.max_steps) |max| {
+                if (self.machine.steps >= max) return;
+            }
+            if (self.options.breakpoint) |bp| {
+                if (self.machine.cpu.pc == bp) return;
+            }
+            if (self.options.mooneye_test and self.machine.mooneyeResult() != null) return;
+
+            // Fixed-length workloads are common enough to deserve the tight
+            // core loop. Conditional runs remain instruction-granular so
+            // breakpoints and test completion never overshoot.
+            if (self.options.breakpoint == null and !self.options.mooneye_test) {
+                if (self.options.max_steps) |max| {
+                    self.machine.runInstructions(max - self.machine.steps);
+                    return;
+                }
+                self.machine.runInstructions(1_000_000);
+            } else {
+                _ = self.machine.step();
+            }
         }
     }
 
