@@ -78,8 +78,6 @@ pub const Emulator = struct {
             self.printCpuState();
         }
 
-        const lcdc = self.machine.bus.io.getLcdc();
-        self.machine.ppu.setEnabled((lcdc & 0x80) != 0);
         self.syncUiStatus();
 
         while (self.running) {

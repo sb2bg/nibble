@@ -109,6 +109,8 @@ pub const Bus = struct {
     }
 
     pub fn tickDma(self: *Bus, cycles: u8) void {
+        if (!self.dma.active and self.dma.start_delay == 0) return;
+
         var remaining = cycles;
         while (remaining > 0) : (remaining -= 1) {
             if (self.dma.start_delay != 0) {

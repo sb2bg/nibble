@@ -315,14 +315,17 @@ pub const Machine = struct {
         if (cycles == 0) return;
 
         const lcdc = self.bus.io.getLcdc();
-        self.ppu.setEnabled((lcdc & 0x80) != 0);
-        self.ppu.syncIoState(&self.bus);
+        const lcd_enabled = (lcdc & 0x80) != 0;
+        if (self.ppu.isEnabled() != lcd_enabled) {
+            self.ppu.setEnabled(lcd_enabled);
+            self.ppu.syncIoState(&self.bus);
 
-        if ((lcdc & 0x80) == 0) {
-            self.bus.io.setLy(0);
-            self.bus.io.setPpuMode(0);
-            self.bus.io.setPpuMemoryBlocked(false, false);
-            self.bus.io.releaseMode0Stat();
+            if (!lcd_enabled) {
+                self.bus.io.setLy(0);
+                self.bus.io.setPpuMode(0);
+                self.bus.io.setPpuMemoryBlocked(false, false);
+                self.bus.io.releaseMode0Stat();
+            }
         }
 
         self.ppu.tick(cycles, &self.bus);

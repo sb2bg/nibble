@@ -145,7 +145,31 @@ pub const Ppu = struct {
 
     pub fn tick(self: *Ppu, cycles: u32, bus: anytype) void {
         if (!self.enabled) return;
+
+        // Most blanking dots only advance an internal counter. Jump across a
+        // batch when no LY, STAT, mode, or bus-arbitration edge can occur in
+        // it; batches touching an edge retain the dot reference path below.
+        if (self.canSkipBlankDots(cycles)) {
+            self.mode_cycles += cycles;
+            return;
+        }
         for (0..cycles) |_| self.tickDot(bus);
+    }
+
+    fn canSkipBlankDots(self: *const Ppu, cycles: u32) bool {
+        return switch (self.mode) {
+            .VBlank => self.mode_cycles + cycles < 456,
+            .HBlank => blk: {
+                if (self.vblank_startup or self.mode0_stat_delay != 0 or
+                    self.lcd_startup or self.line_start_delay != 0)
+                {
+                    break :blk false;
+                }
+                const duration = 372 - @min(@as(u32, self.mode3_duration), 372);
+                break :blk self.mode_cycles + cycles < duration;
+            },
+            .OamSearch, .PixelTransfer => false,
+        };
     }
 
     fn tickDot(self: *Ppu, bus: anytype) void {
@@ -572,6 +596,10 @@ pub const Ppu = struct {
             self.object_fifo.clear();
         }
     }
+
+    pub fn isEnabled(self: *const Ppu) bool {
+        return self.enabled;
+    }
 };
 
 test "disabling LCD leaves PPU in HBlank mode" {
@@ -581,6 +609,44 @@ test "disabling LCD leaves PPU in HBlank mode" {
 
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     try std.testing.expectEqual(@as(u8, 0), ppu.ly);
+}
+
+test "blanking fast path matches dot advancement away from edges" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const TestBus = struct {
+        io: IoRegisters,
+
+        fn readVram(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+
+        fn readOam(_: *const @This(), _: u16) u8 {
+            return 0;
+        }
+    };
+
+    var fast_bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer fast_bus.io.deinit();
+    var reference_bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer reference_bus.io.deinit();
+
+    var fast = Ppu.init();
+    fast.enabled = true;
+    fast.mode = .HBlank;
+    fast.mode_cycles = 10;
+    fast.mode3_duration = 172;
+    var reference = fast;
+
+    fast.tick(100, &fast_bus);
+    for (0..100) |_| reference.tickDot(&reference_bus);
+    try std.testing.expectEqualDeep(reference, fast);
+
+    fast.mode = .VBlank;
+    fast.mode_cycles = 100;
+    reference = fast;
+    fast.tick(255, &fast_bus);
+    for (0..255) |_| reference.tickDot(&reference_bus);
+    try std.testing.expectEqualDeep(reference, fast);
 }
 
 test "DMG LCD startup skips mode 2 and phases later scanlines" {
