@@ -3,6 +3,9 @@ const std = @import("std");
 pub const MASTER_CLOCK: u32 = 4_194_304;
 pub const SAMPLE_RATE: u32 = 48_000;
 const SAMPLE_BUFFER_CAPACITY = 256;
+// The DMG output capacitor retains 0.999958 of its charge per 4.194 MHz dot.
+// Convert that measured hardware constant to this core's 48 kHz handoff rate.
+const DMG_HIGH_PASS_RATE: f32 = 0.99633664;
 
 pub const StereoSample = extern struct {
     left: i16,
@@ -650,6 +653,10 @@ pub const Apu = struct {
     fn emitSample(self: *Apu) void {
         if (self.sample_count == SAMPLE_BUFFER_CAPACITY) return;
 
+        // Each enabled DMG DAC spans 0.7 V to 3.7 V in linear 0.2 V
+        // increments. The on-chip resistor mixer inverts around 2.2 V and
+        // weights each routed channel by (NR50 volume + 1) / 32. Normalizing
+        // that measured circuit gives the arithmetic below exactly.
         const outputs = [_]f32{
             self.channelAnalog(self.pulseOutput(1), self.pulse1.dac_enabled),
             self.channelAnalog(self.pulseOutput(2), self.pulse2.dac_enabled),
@@ -672,8 +679,8 @@ pub const Apu = struct {
         if (any_dac) {
             const filtered_left = left - self.high_pass_left;
             const filtered_right = right - self.high_pass_right;
-            self.high_pass_left = left - filtered_left * 0.996;
-            self.high_pass_right = right - filtered_right * 0.996;
+            self.high_pass_left = left - filtered_left * DMG_HIGH_PASS_RATE;
+            self.high_pass_right = right - filtered_right * DMG_HIGH_PASS_RATE;
             left = filtered_left;
             right = filtered_right;
         } else {
@@ -876,6 +883,15 @@ test "sample clock emits 48 kHz stereo frames" {
     apu.discardSamples();
     apu.tick(255, 0);
     try std.testing.expectEqual(@as(usize, 2), apu.pendingSamples().len);
+}
+
+test "DMG high-pass charge rate is converted to the PCM sample cadence" {
+    const expected: f32 = @floatCast(std.math.pow(
+        f64,
+        0.999958,
+        @as(f64, MASTER_CLOCK) / @as(f64, SAMPLE_RATE),
+    ));
+    try std.testing.expectApproxEqAbs(expected, DMG_HIGH_PASS_RATE, 0.0000001);
 }
 
 test "post-boot audio state is silent while channel one remains active" {

@@ -27,16 +27,13 @@ Implemented core pieces:
 - In-memory save states (10 slots per run session)
 - Headless mode and serial output capture for test ROM workflows
 - Cycle-driven DMG serial transfers with completion interrupts
+- Host-driven external serial clock/data edges for deterministic link partners
+- Oscillator-gated DMG `STOP`, including DIV reset and selected-joypad wake
+- Cancelable, phased object fetches sharing the background fetch pipeline
 - Four-channel DMG APU with sweep, envelopes, length counters, wave RAM, and
   divider-driven frame sequencing
+- DMG resistor-network stereo mixing and measured-rate high-pass filtering
 - Buffered 48 kHz stereo SDL audio with pause-safe queueing and mute control
-
-Known gaps:
-- `STOP` instruction behavior is only partially modeled
-- Object fetch cancellation and fetcher arbitration are still approximate
-- External-clock serial transfers have no link-partner implementation
-- The analog audio path uses a practical linear mixer and high-pass filter;
-  individual DMG board revisions have additional nonlinear characteristics
 
 ## Requirements
 
@@ -138,6 +135,8 @@ Important automation operations include:
   hold/release actions, injected `std.Io` scheduling, and allocation-free
   contiguous `palette_u8` or packed 2bpp model observations;
 - `peek` for observations that do not advance time or trigger CPU bus effects;
+- `serialOutgoingBit` and `clockSerialExternal` for caller-owned link cables,
+  printers, adapters, and protocol test harnesses;
 - `observableDigest` for regression and replay identity; and
 - `inspectCartridge` for live mapper banks, RAM enable state, and MBC3 RTC state.
 
@@ -154,6 +153,13 @@ directly instead of materializing the fixed 128 KiB cartridge-RAM reserve.
 `OwnedSnapshot` similarly allocates only the cartridge RAM present in the
 loaded cartridge; the larger value `Snapshot` remains available for callers
 that require allocation-free capture and restore.
+
+`Machine.step` returns zero cycles while the CPU is in DMG `STOP`, because the
+oscillator and peripherals are not advancing. A selected joypad transition
+applied through `setButtons` wakes it; the next step performs the wake M-cycle.
+`runUntilCycle` returns `error.Stopped` if no current-cycle input wakes the
+machine. External serial clock pulses are likewise explicit host events rather
+than synthetic elapsed time.
 
 CLI options:
 - `-h`, `--help`: show help

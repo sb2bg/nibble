@@ -157,6 +157,13 @@ pub const Bus = struct {
         self.serial.tick(cycles, &self.io);
     }
 
+    /// STOP asserts the same divider-reset signal as a DIV write without
+    /// performing an additional CPU bus access.
+    pub fn enterStopMode(self: *Bus) void {
+        self.apu.dividerReset(self.timer.system_counter);
+        self.timer.writeRegister(&self.io, @intFromEnum(IoReg.DIV), 0);
+    }
+
     pub fn triggerOamBugWriteIdu(self: *Bus, addr: u16) void {
         if (!isOamAddress(addr) or !self.isPpuInMode2()) return;
         const row = self.io.getOamScanRow();

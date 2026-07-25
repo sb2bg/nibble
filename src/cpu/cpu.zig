@@ -39,6 +39,7 @@ pub const Cpu = struct {
     ime: bool, // Interrupt Master Enable
     ime_enable_delay: u2, // EI enables IME after the next instruction
     halted: bool, // CPU is halted (waiting for interrupt)
+    stopped: bool, // DMG oscillator is stopped (waiting for a selected JOYP line)
     halt_bug: bool, // HALT bug: next opcode fetch does not increment PC
 
     // Cycle tracking
@@ -66,6 +67,7 @@ pub const Cpu = struct {
             .ime = false,
             .ime_enable_delay = 0,
             .halted = false,
+            .stopped = false,
             .halt_bug = false,
         };
     }
@@ -394,19 +396,24 @@ pub const Cpu = struct {
             },
             .stop => blk: {
                 const key1_index = @intFromEnum(IoReg.KEY1);
-                if ((bus.io.data[key1_index] & 0x01) != 0) {
+                // Only the level present as STOP is entered can make it an
+                // immediate NOP. Discard older JOYP edges before arming the
+                // low-power wake latch.
+                const joypad_wake = bus.io.stopWakeLineLow();
+                bus.io.stop_wake_requested = false;
+                if ((bus.io.data[key1_index] & 0x01) != 0 and !joypad_wake) {
                     // On CGB, an armed KEY1 makes STOP switch CPU speed and
                     // resume instead of entering low-power mode. Full CGB
                     // double-speed scheduling is outside the current DMG
                     // model, but consuming the request is required by CGB-
                     // compatible test ROMs.
                     bus.io.data[key1_index] = (bus.io.data[key1_index] ^ 0x80) & 0x80;
-                } else {
-                    // DMG STOP wake sources are not yet modeled separately
-                    // from HALT interrupts.
-                    self.halted = true;
+                } else if (!joypad_wake) {
+                    bus.enterStopMode();
+                    self.stopped = true;
                 }
-                break :blk 4;
+                // The opcode and STOP's padding byte are both fetched.
+                break :blk 8;
             },
             .di => blk: {
                 self.ime = false;
@@ -1028,6 +1035,17 @@ pub const Cpu = struct {
     /// Execute one CPU step: handle interrupts, then fetch-decode-execute
     /// Returns the number of cycles used
     pub fn step(self: *Cpu, bus: *Bus) u8 {
+        // STOP gates the DMG oscillator, so neither CPU time nor peripherals
+        // advance while it waits. A selected P10-P13 line resumes the clock
+        // independently of IE/IF; the first M-cycle is a wake-up cycle.
+        if (self.stopped) {
+            if (!bus.io.consumeStopWake()) return 0;
+            self.stopped = false;
+            bus.tickInternal(4);
+            self.cycles += 4;
+            return 4;
+        }
+
         bus.io.latchLateInterrupts();
 
         // Check for interrupts
@@ -1086,7 +1104,45 @@ test "STOP consumes an armed CGB speed switch instead of halting" {
     _ = cpu.execute(.stop, &bus);
 
     try std.testing.expect(!cpu.halted);
+    try std.testing.expect(!cpu.stopped);
     try std.testing.expectEqual(@as(u8, 0x80), bus.io.data[@intFromEnum(IoReg.KEY1)]);
+}
+
+test "DMG STOP gates clocks until a selected joypad line falls" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    bus.io.write(@intFromEnum(IoReg.JOYP), 0x10); // Select A/B/Select/Start.
+    bus.io.stop_wake_requested = false;
+
+    try std.testing.expectEqual(@as(u8, 8), cpu.execute(.stop, &bus));
+    try std.testing.expect(cpu.stopped);
+    try std.testing.expectEqual(@as(u16, 0), bus.timer.system_counter);
+    const cycles_before = cpu.cycles;
+    try std.testing.expectEqual(@as(u8, 0), cpu.step(&bus));
+    try std.testing.expectEqual(cycles_before, cpu.cycles);
+
+    bus.io.setJoypadState(0xEF); // Press A.
+    try std.testing.expectEqual(@as(u8, 4), cpu.step(&bus));
+    try std.testing.expect(!cpu.stopped);
+    try std.testing.expectEqual(cycles_before + 4, cpu.cycles);
+}
+
+test "STOP acts as a NOP when a selected joypad line is already low" {
+    var bus = Bus.init(
+        std.testing.allocator,
+        try @import("../test_support.zig").emptyCartridge(std.testing.allocator),
+    );
+    defer bus.deinit();
+    var cpu = Cpu.init();
+    bus.io.write(@intFromEnum(IoReg.JOYP), 0x10);
+    bus.io.setJoypadState(0xEF);
+
+    _ = cpu.execute(.stop, &bus);
+    try std.testing.expect(!cpu.stopped);
 }
 
 test "interrupt raised during opcode fetch discards the instruction" {

@@ -16,11 +16,11 @@ snapshots, parallel machines, and the SDL application share one hardware core.
 
 Its main weakness is inside the performance/fidelity boundary. CPU bus timing
 uses an indirect cycle hook, and the dot PPU has enough persistent microstate
-that it cannot safely jump across active rendering yet. The object fetcher also
-retains the approximations documented below. These are localized engineering
-debts rather than cross-layer coupling, but they prevent Nibble from claiming
-either cycle-perfect hardware or 100x single-machine speed today. Snapshot
-types are in-process state, not a versioned persistent file format.
+that it cannot safely jump across active rendering yet. These are localized
+engineering debts rather than cross-layer coupling, but they prevent Nibble
+from claiming either cycle-perfect hardware or 100x single-machine speed
+today. Snapshot types are in-process state, not a versioned persistent file
+format.
 
 The research-runtime work strengthens the existing design instead of adding a
 second emulator path: observation policy, deterministic inputs/resets,
@@ -146,32 +146,38 @@ Implemented timing details include:
   discard, and FIFO restart at the window boundary;
 - mode-2 selection of at most ten objects, DMG X/OAM priority ordering, and an
   eight-pixel object FIFO mixed with background pixels at LCD output time;
+- cancelable object alignment/tile/low/high fetch phases, with background
+  fetcher progress during shared-pipeline arbitration and no atomic row commit;
 - palette lookup at pixel-output time, allowing mid-scanline BGP changes to
   affect only pixels that have not reached the LCD yet;
 - a window line counter that advances only on lines where the window is drawn;
 - cycle-driven MBC3 RTC state, making emulation and save states deterministic.
 - eight-bit internal-clock serial transfers over 4,096 dots, including visible
   SB shifts, SC completion, disconnected-high input, and the serial interrupt.
+- arbitrary-cadence external serial clock edges with simultaneous SIN/SOUT bit
+  exchange through a deterministic host-owned link boundary;
+- oscillator-gated DMG STOP, including divider reset, frozen peripherals, and
+  wake-up from selected P10-P13 joypad lines independently of IE;
 - DIV-APU falling-edge frame sequencing with hardware length, envelope, and
   sweep cadence, including DIV-write clocks and DMG power-off length behavior;
 - all four DMG audio generators, NR50/NR51 stereo routing, DAC power gating,
   wave-RAM access windows, and channel-3 retrigger corruption; and
-- fixed-rate 48 kHz PCM generation with a high-pass filter and a bounded SDL
-  queue that cannot feed host timing back into the emulated clock.
+- fixed-rate 48 kHz PCM generation from the DMG's DAC voltage range,
+  resistor-network routing/volume equation, and measured capacitor charge
+  rate, with a bounded SDL queue that cannot feed host timing back into the
+  emulated clock.
 
-## Deliberate approximations
+## Scope boundaries and deliberate approximations
 
-The PPU has separate background and object FIFOs, but an object tile fetch is
-still represented as one scheduled stall and atomic tile-row read instead of
-the hardware's cancelable fetch micro-steps. Rapid mid-fetch LCDC changes and
-some background/object fetcher arbitration therefore remain approximate.
 CPU cycles that are not attached to a memory access are generally applied after
 the instruction, so a few sub-instruction peripheral races remain approximate.
-External serial transfers wait for a clock indefinitely because link partners
-are not implemented. STOP is a low-power approximation. The APU's digital
-timing is hardware-tested, while the final analog stage deliberately uses a
-linear per-channel mix rather than board-revision-specific nonlinear transfer
-functions and capacitor characteristics.
+An unconnected external serial transfer correctly waits indefinitely; cable
+cadence and partner behavior belong to the host and enter through
+`clockSerialExternal`. DMG STOP freezes emulated time, so automation must wake
+it with an out-of-band button update rather than a future emulated-cycle event.
+The PCM boundary is the DMG SoC's stereo output: downstream physical speaker,
+headphone-load, enclosure, and aging-component coloration are presentation
+effects rather than emulated register-visible hardware.
 
 These references define the current fidelity targets:
 
@@ -183,6 +189,8 @@ These references define the current fidelity targets:
 - [Pan Docs: serial data transfer](https://gbdev.io/pandocs/Serial_Data_Transfer_%28Link_Cable%29.html)
 - [Pan Docs: audio](https://gbdev.io/pandocs/Audio.html) and
   [audio registers](https://gbdev.io/pandocs/Audio_Registers.html)
+- [DMG silicon analog analysis](https://iceboy.a-singer.de/doc/analog_audio.html)
+  for the DAC voltage and resistor-mixer equations;
 - [Pan Docs: MBC1](https://gbdev.io/pandocs/MBC1.html), [MBC2](https://gbdev.io/pandocs/MBC2.html), and [MBC3](https://gbdev.io/pandocs/MBC3.html)
 - [Mooneye Test Suite](https://github.com/Gekkio/mooneye-test-suite), whose 62
   applicable DMG acceptance ROMs form the hardware-timing baseline.

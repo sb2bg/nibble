@@ -247,6 +247,7 @@ test "policy shim consumes packed observations deterministically" {
             .pc = 0x1234,
             .ime = false,
             .halted = false,
+            .stopped = false,
             .cycles = 4,
         },
         .instructions = 1,

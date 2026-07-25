@@ -104,6 +104,7 @@ pub const CpuObservation = struct {
     pc: u16,
     ime: bool,
     halted: bool,
+    stopped: bool,
     cycles: u64,
 };
 
@@ -143,6 +144,7 @@ const CpuState = struct {
     ime: bool,
     ime_enable_delay: u2,
     halted: bool,
+    stopped: bool,
     halt_bug: bool,
     cycles: u64,
 };
@@ -151,6 +153,7 @@ const IoState = struct {
     data: [0x80]u8,
     joypad_select: u8,
     joypad_buttons: u8,
+    stop_wake_requested: bool,
     oam_scan_row: u8,
     ppu_oam_read_blocked: bool,
     ppu_oam_write_blocked: bool,
@@ -308,7 +311,7 @@ pub const Machine = struct {
         self: *Machine,
         target_cycle: u64,
         inputs: []const CycleInput,
-    ) error{ CycleInPast, InputOutsideRange, UnsortedInputs }!CycleStepResult {
+    ) error{ CycleInPast, InputOutsideRange, UnsortedInputs, Stopped }!CycleStepResult {
         if (target_cycle < self.cpu.cycles) return error.CycleInPast;
 
         var previous_cycle = self.cpu.cycles;
@@ -326,7 +329,9 @@ pub const Machine = struct {
         };
         self.applyCycleInputsAtCurrent(&cursor);
         const start_steps = self.steps;
-        while (self.cpu.cycles < target_cycle) _ = self.stepWithCycleInputs(&cursor);
+        while (self.cpu.cycles < target_cycle) {
+            if (self.stepWithCycleInputs(&cursor).cycles == 0) return error.Stopped;
+        }
 
         return .{
             .requested_cycle = target_cycle,
@@ -427,6 +432,7 @@ pub const Machine = struct {
                 .pc = self.cpu.pc,
                 .ime = self.cpu.ime,
                 .halted = self.cpu.halted,
+                .stopped = self.cpu.stopped,
                 .cycles = self.cpu.cycles,
             },
             .instructions = self.steps,
@@ -547,9 +553,20 @@ pub const Machine = struct {
         hashInteger(&hash, self.cpu.sp);
         hashInteger(&hash, self.cpu.pc);
         hashInteger(&hash, self.cpu.cycles);
+        hashInteger(&hash, @intFromBool(self.cpu.ime));
+        hashInteger(&hash, @intFromBool(self.cpu.halted));
+        hashInteger(&hash, @intFromBool(self.cpu.stopped));
         hashInteger(&hash, self.steps);
         hashInteger(&hash, self.frames);
         hashInteger(&hash, self.bus.timer.system_counter);
+        hashInteger(&hash, self.bus.io.joypad_select);
+        hashInteger(&hash, self.bus.io.joypad_buttons);
+        hashInteger(&hash, @intFromBool(self.bus.io.stop_wake_requested));
+        hashInteger(&hash, @intFromBool(self.bus.serial.active));
+        hashInteger(&hash, @intFromEnum(self.bus.serial.clock_source));
+        hashInteger(&hash, self.bus.serial.outgoing);
+        hashInteger(&hash, self.bus.serial.bits_remaining);
+        hashInteger(&hash, self.bus.serial.dots_until_shift);
         hash.update(&self.bus.wram);
         hash.update(&self.bus.hram);
         hash.update(&self.bus.vram);
@@ -582,6 +599,22 @@ pub const Machine = struct {
 
     pub fn discardAudio(self: *Machine) void {
         self.bus.apu.discardSamples();
+    }
+
+    /// Inspect the active serial transfer without advancing emulated time.
+    pub fn serialClockSource(self: *const Machine) ?Serial.ClockSource {
+        return if (self.bus.serial.active) self.bus.serial.clock_source else null;
+    }
+
+    /// Sample the link port's SOUT level before a partner clocks the next bit.
+    pub fn serialOutgoingBit(self: *const Machine) ?u1 {
+        return self.bus.serial.outgoingBit(&self.bus.io);
+    }
+
+    /// Drive one external serial clock edge. This is the deterministic link
+    /// boundary for a cable, printer, four-player adapter, or test harness.
+    pub fn clockSerialExternal(self: *Machine, incoming: u1) ?u1 {
+        return self.bus.serial.clockExternal(&self.bus.io, incoming);
     }
 
     pub fn mooneyeResult(self: *const Machine) ?MooneyeResult {
@@ -687,6 +720,7 @@ pub const Machine = struct {
                 .ime = self.cpu.ime,
                 .ime_enable_delay = self.cpu.ime_enable_delay,
                 .halted = self.cpu.halted,
+                .stopped = self.cpu.stopped,
                 .halt_bug = self.cpu.halt_bug,
                 .cycles = self.cpu.cycles,
             },
@@ -707,6 +741,7 @@ pub const Machine = struct {
                 .data = self.bus.io.data,
                 .joypad_select = self.bus.io.joypad_select,
                 .joypad_buttons = self.bus.io.joypad_buttons,
+                .stop_wake_requested = self.bus.io.stop_wake_requested,
                 .oam_scan_row = self.bus.io.oam_scan_row,
                 .ppu_oam_read_blocked = self.bus.io.ppu_oam_read_blocked,
                 .ppu_oam_write_blocked = self.bus.io.ppu_oam_write_blocked,
@@ -741,6 +776,7 @@ pub const Machine = struct {
         branch.bus.io.data = self.bus.io.data;
         branch.bus.io.joypad_select = self.bus.io.joypad_select;
         branch.bus.io.joypad_buttons = self.bus.io.joypad_buttons;
+        branch.bus.io.stop_wake_requested = self.bus.io.stop_wake_requested;
         branch.bus.io.oam_scan_row = self.bus.io.oam_scan_row;
         branch.bus.io.ppu_oam_read_blocked = self.bus.io.ppu_oam_read_blocked;
         branch.bus.io.ppu_oam_write_blocked = self.bus.io.ppu_oam_write_blocked;
@@ -774,6 +810,7 @@ pub const Machine = struct {
         self.cpu.ime = state.cpu.ime;
         self.cpu.ime_enable_delay = state.cpu.ime_enable_delay;
         self.cpu.halted = state.cpu.halted;
+        self.cpu.stopped = state.cpu.stopped;
         self.cpu.halt_bug = state.cpu.halt_bug;
         self.cpu.cycles = state.cpu.cycles;
         self.cpu.reader_ctx = undefined;
@@ -795,6 +832,7 @@ pub const Machine = struct {
         self.bus.io.data = state.io.data;
         self.bus.io.joypad_select = state.io.joypad_select;
         self.bus.io.joypad_buttons = state.io.joypad_buttons;
+        self.bus.io.stop_wake_requested = state.io.stop_wake_requested;
         self.bus.io.oam_scan_row = state.io.oam_scan_row;
         self.bus.io.ppu_oam_read_blocked = state.io.ppu_oam_read_blocked;
         self.bus.io.ppu_oam_write_blocked = state.io.ppu_oam_write_blocked;
@@ -865,6 +903,81 @@ test "machine button API uses the DMG active-low layout" {
 
     machine.setButtons(.{ .right = true, .a = true, .start = true });
     try std.testing.expectEqual(@as(u8, 0x6E), machine.bus.io.getJoypadState());
+}
+
+test "machine STOP freezes peripherals and wakes from selected buttons" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    machine.cpu.pc = 0xC000;
+    machine.bus.wram[0] = 0x10; // STOP
+    machine.bus.wram[1] = 0x00; // Padding byte
+    machine.bus.io.write(@intFromEnum(@import("memory/io.zig").IoReg.JOYP), 0x10);
+    machine.bus.io.stop_wake_requested = false;
+
+    const entered = machine.step();
+    try std.testing.expectEqual(@as(u8, 8), entered.cycles);
+    try std.testing.expect(machine.cpu.stopped);
+    try std.testing.expectEqual(@as(u16, 0), machine.bus.timer.system_counter);
+    const stopped_state = machine.capture();
+
+    const ppu_before = machine.ppu;
+    const serial_before = machine.bus.serial;
+    const dma_before = machine.bus.dma;
+    const apu_before = machine.bus.apu;
+    const mapper_before = machine.bus.cartridge.mbc.snapshot();
+    const io_before = machine.bus.io.data;
+    const idle = machine.step();
+    try std.testing.expectEqual(@as(u8, 0), idle.cycles);
+    try std.testing.expectEqual(@as(u16, 0), machine.bus.timer.system_counter);
+    try std.testing.expectEqualDeep(ppu_before, machine.ppu);
+    try std.testing.expectEqualDeep(serial_before, machine.bus.serial);
+    try std.testing.expectEqualDeep(dma_before, machine.bus.dma);
+    try std.testing.expectEqualDeep(apu_before, machine.bus.apu);
+    try std.testing.expectEqualDeep(mapper_before, machine.bus.cartridge.mbc.snapshot());
+    try std.testing.expectEqualSlices(u8, &io_before, &machine.bus.io.data);
+    try std.testing.expectError(
+        error.Stopped,
+        machine.runUntilCycle(machine.cpu.cycles + 4, &.{}),
+    );
+
+    machine.setButtons(.{ .a = true });
+    const woke = machine.step();
+    try std.testing.expectEqual(@as(u8, 4), woke.cycles);
+    try std.testing.expect(!machine.cpu.stopped);
+    try std.testing.expectEqual(@as(u16, 4), machine.bus.timer.system_counter);
+
+    machine.restore(stopped_state);
+    try std.testing.expect(machine.cpu.stopped);
+    try std.testing.expectEqual(@as(u8, 0), machine.step().cycles);
+}
+
+test "machine exposes deterministic external serial clock edges" {
+    var machine = Machine.init(
+        std.testing.allocator,
+        try @import("test_support.zig").emptyCartridge(std.testing.allocator),
+        .{},
+    );
+    defer machine.deinit();
+
+    machine.bus.io.data[@intFromEnum(@import("memory/io.zig").IoReg.SB)] = 0x96;
+    machine.bus.serial.writeControl(&machine.bus.io, 0x80);
+    try std.testing.expectEqual(Serial.ClockSource.external, machine.serialClockSource().?);
+    try std.testing.expectEqual(@as(u1, 1), machine.serialOutgoingBit().?);
+
+    const digest_before_pulse = machine.observableDigest();
+    var outgoing: u8 = machine.clockSerialExternal(0).?;
+    try std.testing.expect(digest_before_pulse != machine.observableDigest());
+    for (1..8) |index| {
+        const incoming: u1 = @truncate(@as(u8, 0x3C) >> @intCast(7 - index));
+        outgoing = (outgoing << 1) | machine.clockSerialExternal(incoming).?;
+    }
+    try std.testing.expectEqual(@as(u8, 0x96), outgoing);
+    try std.testing.expectEqual(@as(?Serial.ClockSource, null), machine.serialClockSource());
 }
 
 test "machine forks share ROM and isolate mutable state" {

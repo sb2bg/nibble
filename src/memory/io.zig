@@ -93,6 +93,9 @@ pub const IoRegisters = struct {
     joypad_buttons: u8, // Button state: bits 0-3 = D-pad, bits 4-7 = buttons
     // Bit layout: Start, Select, B, A (bits 4-7), Down, Up, Left, Right (bits 0-3)
     // 0 = pressed, 1 = not pressed
+    // Unlike the JOYP interrupt flag, the STOP wake line is not gated by IE.
+    // Keep the physical selected-line edge until the CPU consumes it.
+    stop_wake_requested: bool,
 
     // Current OAM scan row during mode 2 (0-19)
     oam_scan_row: u8,
@@ -122,6 +125,7 @@ pub const IoRegisters = struct {
             .data = [_]u8{0} ** 0x80,
             .joypad_select = 0x30, // Neither selected
             .joypad_buttons = 0xFF, // All buttons released
+            .stop_wake_requested = false,
             .oam_scan_row = 0,
             .ppu_oam_read_blocked = false,
             .ppu_oam_write_blocked = false,
@@ -279,7 +283,22 @@ pub const IoRegisters = struct {
 
     fn requestJoypadEdge(self: *IoRegisters, old_lines: u8) void {
         const new_lines = self.readJoypad() & 0x0F;
-        if ((old_lines & ~new_lines) != 0) self.requestInterrupt(Interrupt.JOYPAD);
+        if ((old_lines & ~new_lines) != 0) {
+            self.stop_wake_requested = true;
+            self.requestInterrupt(Interrupt.JOYPAD);
+        }
+    }
+
+    /// STOP samples the selected P10-P13 input lines directly. This is
+    /// intentionally independent from IF/IE and from interrupt dispatch.
+    pub fn stopWakeLineLow(self: *const IoRegisters) bool {
+        return (self.readJoypad() & 0x0F) != 0x0F;
+    }
+
+    pub fn consumeStopWake(self: *IoRegisters) bool {
+        const requested = self.stop_wake_requested or self.stopWakeLineLow();
+        self.stop_wake_requested = false;
+        return requested;
     }
 
     /// Request an interrupt by setting a bit in IF

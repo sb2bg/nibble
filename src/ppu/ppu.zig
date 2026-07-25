@@ -28,7 +28,14 @@ const LineSprite = struct {
     tile: u8 = 0,
     attributes: u8 = 0,
     oam_index: u8 = 0,
-    fetch_dots: u8 = 0,
+};
+
+const ObjectFetchPhase = enum(u3) {
+    idle,
+    alignment,
+    tile,
+    low,
+    high,
 };
 
 /// Picture Processing Unit
@@ -66,7 +73,13 @@ pub const Ppu = struct {
     line_sprite_count: u4,
     oam_scan_index: u6,
     next_sprite: u4,
-    sprite_fetch_dots: u8,
+    object_fetch_phase: ObjectFetchPhase,
+    object_phase_dots: u2,
+    object_align_dots: u4,
+    object_sprite: LineSprite,
+    object_address: u16,
+    object_low: u8,
+    last_object_tile: ?i16,
 
     pub fn init() Ppu {
         return Ppu{
@@ -94,7 +107,13 @@ pub const Ppu = struct {
             .line_sprite_count = 0,
             .oam_scan_index = 0,
             .next_sprite = 0,
-            .sprite_fetch_dots = 0,
+            .object_fetch_phase = .idle,
+            .object_phase_dots = 0,
+            .object_align_dots = 0,
+            .object_sprite = .{},
+            .object_address = 0,
+            .object_low = 0,
+            .last_object_tile = null,
         };
     }
 
@@ -122,7 +141,7 @@ pub const Ppu = struct {
         self.line_sprite_count = 0;
         self.oam_scan_index = 0;
         self.next_sprite = 0;
-        self.sprite_fetch_dots = 0;
+        self.resetObjectFetcher();
         @memset(&self.frame_buffer, [_]DmgColor{.White} ** SCREEN_WIDTH);
         self.capture_pixels = capture_pixels;
     }
@@ -330,7 +349,7 @@ pub const Ppu = struct {
         self.fetcher.reset(false);
         self.object_fifo.clear();
         self.next_sprite = 0;
-        self.sprite_fetch_dots = 0;
+        self.resetObjectFetcher();
         self.sortLineSprites();
 
         if (self.isWindowVisible(bus) and bus.io.getWx() <= 7) {
@@ -341,7 +360,6 @@ pub const Ppu = struct {
 
         self.mode3_duration = 172 + @as(u16, bus.io.getScx() & 0x07);
         if (self.isWindowVisible(bus)) self.mode3_duration += 6;
-        _ = self.scheduleSpriteFetches(bus, 289 - self.mode3_duration);
         self.setMode(.PixelTransfer, bus);
     }
 
@@ -384,7 +402,7 @@ pub const Ppu = struct {
             self.isWindowVisible(bus) and self.pixel_x == window_start;
         const next_dot_finishes_line = self.pixel_x == SCREEN_WIDTH - 1 and
             self.startup_dots == 0 and
-            self.sprite_fetch_dots == 0 and
+            self.object_fetch_phase == .idle and
             self.next_sprite >= self.line_sprite_count and
             self.fetcher.fifo.len > 0 and
             !window_stalls_next_dot;
@@ -412,13 +430,16 @@ pub const Ppu = struct {
     }
 
     fn tickObjectFetcher(self: *Ppu, bus: anytype, lcdc: u8) bool {
-        if (self.sprite_fetch_dots > 0) {
+        if (self.object_fetch_phase != .idle) {
             if ((lcdc & 0x02) == 0) {
-                self.sprite_fetch_dots = 0;
+                // DMG LCDC.1 changes can abort any unfinished object fetch.
+                // Tile bytes are committed to the object FIFO only after the
+                // high-byte phase, so a canceled fetch cannot reappear if
+                // objects are enabled again later on the scanline.
+                self.cancelObjectFetch();
                 return false;
             }
-            self.sprite_fetch_dots -= 1;
-            return true;
+            return self.advanceObjectFetch(bus, lcdc);
         }
 
         while (self.next_sprite < self.line_sprite_count) {
@@ -437,18 +458,71 @@ pub const Ppu = struct {
                 self.next_sprite += 1;
                 continue;
             }
-            self.fetchSprite(bus, sprite.*);
-            self.sprite_fetch_dots = sprite.fetch_dots;
+            self.beginObjectFetch(bus, sprite.*);
             self.next_sprite += 1;
-            if (self.sprite_fetch_dots > 0) {
-                self.sprite_fetch_dots -= 1; // The current dot is the first fetch dot.
-                return true;
-            }
+            return self.advanceObjectFetch(bus, lcdc);
         }
         return false;
     }
 
-    fn fetchSprite(self: *Ppu, bus: anytype, sprite: LineSprite) void {
+    fn beginObjectFetch(self: *Ppu, bus: anytype, sprite: LineSprite) void {
+        self.object_sprite = sprite;
+        self.object_phase_dots = 0;
+        self.object_align_dots = self.objectFetchPenalty(bus, sprite) - 6;
+        self.object_fetch_phase = if (self.object_align_dots == 0) .tile else .alignment;
+    }
+
+    fn advanceObjectFetch(self: *Ppu, bus: anytype, lcdc: u8) bool {
+        switch (self.object_fetch_phase) {
+            .idle => return false,
+            .alignment => {
+                // Object and background fetching share one fetcher. During
+                // alignment the background state machine may finish its
+                // current stage, but LCD output remains stalled.
+                self.fetcher.tick(
+                    bus,
+                    lcdc,
+                    self.ly,
+                    bus.io.getScx(),
+                    bus.io.getScy(),
+                    self.window_line,
+                );
+                self.object_align_dots -= 1;
+                if (self.object_align_dots == 0) {
+                    self.object_fetch_phase = .tile;
+                    self.object_phase_dots = 0;
+                }
+            },
+            .tile => {
+                self.object_phase_dots += 1;
+                if (self.object_phase_dots == 2) {
+                    self.object_address = self.objectTileAddress(bus, self.object_sprite);
+                    self.object_fetch_phase = .low;
+                    self.object_phase_dots = 0;
+                }
+            },
+            .low => {
+                self.object_phase_dots += 1;
+                if (self.object_phase_dots == 2) {
+                    self.object_low = bus.readVram(self.object_address);
+                    self.object_fetch_phase = .high;
+                    self.object_phase_dots = 0;
+                }
+            },
+            .high => {
+                self.object_phase_dots += 1;
+                if (self.object_phase_dots == 2) {
+                    const high = bus.readVram(self.object_address + 1);
+                    self.commitObjectRow(self.object_sprite, self.object_low, high);
+                    self.object_fetch_phase = .idle;
+                    self.object_phase_dots = 0;
+                }
+            },
+        }
+        return true;
+    }
+
+    fn objectTileAddress(self: *const Ppu, bus: anytype, sprite: LineSprite) u16 {
         const sprite_height: u8 = if ((bus.io.getLcdc() & 0x04) != 0) 16 else 8;
         var line = @as(i16, self.ly) - (@as(i16, sprite.oam_y) - 16);
         if ((sprite.attributes & 0x40) != 0) line = @as(i16, sprite_height) - 1 - line;
@@ -462,10 +536,10 @@ pub const Ppu = struct {
             }
         }
 
-        const address: u16 =
-            0x8000 + @as(u16, tile) * 16 + @as(u16, @intCast(line)) * 2;
-        const low = bus.readVram(address);
-        const high = bus.readVram(address + 1);
+        return 0x8000 + @as(u16, tile) * 16 + @as(u16, @intCast(line)) * 2;
+    }
+
+    fn commitObjectRow(self: *Ppu, sprite: LineSprite, low: u8, high: u8) void {
         const screen_x = @as(i16, sprite.oam_x) - 8;
         const offset: i8 = @intCast(screen_x - @as(i16, @intCast(self.pixel_x)));
         self.object_fifo.overlayRow(
@@ -476,6 +550,52 @@ pub const Ppu = struct {
             (sprite.attributes & 0x80) != 0,
             offset,
         );
+    }
+
+    fn objectFetchPenalty(self: *Ppu, bus: anytype, sprite: LineSprite) u4 {
+        var penalty: u4 = 6;
+        const tile: i16 = if (sprite.oam_x == 0)
+            -1
+        else blk: {
+            const screen_x = @as(i16, sprite.oam_x) - 8;
+            const window_start = @as(i16, bus.io.getWx()) - 7;
+            const using_window = self.isWindowVisible(bus) and screen_x >= window_start;
+            const fetch_x = if (using_window)
+                screen_x - window_start
+            else
+                screen_x + @as(i16, bus.io.getScx());
+            if (self.last_object_tile == null or
+                self.last_object_tile.? != @divFloor(fetch_x, 8) +
+                    (if (using_window) @as(i16, 0x100) else 0))
+            {
+                const pixel_in_tile: u4 = @intCast(@mod(fetch_x, 8));
+                if (pixel_in_tile < 5) penalty += 5 - pixel_in_tile;
+            }
+            break :blk @divFloor(fetch_x, 8) +
+                (if (using_window) @as(i16, 0x100) else 0);
+        };
+
+        if (sprite.oam_x == 0 and
+            (self.last_object_tile == null or self.last_object_tile.? != tile))
+        {
+            penalty = 11;
+        }
+        self.last_object_tile = tile;
+        return penalty;
+    }
+
+    fn cancelObjectFetch(self: *Ppu) void {
+        self.object_fetch_phase = .idle;
+        self.object_phase_dots = 0;
+        self.object_align_dots = 0;
+        self.object_low = 0;
+    }
+
+    fn resetObjectFetcher(self: *Ppu) void {
+        self.cancelObjectFetch();
+        self.object_sprite = .{};
+        self.object_address = 0;
+        self.last_object_tile = null;
     }
 
     fn outputPixel(self: *Ppu, bus: anytype, fetched_color_id: u2) void {
@@ -522,50 +642,6 @@ pub const Ppu = struct {
         }
     }
 
-    fn scheduleSpriteFetches(self: *Ppu, bus: anytype, max_penalty: u16) u16 {
-        var total: u16 = 0;
-        var last_tile: ?i16 = null;
-
-        for (self.line_sprites[0..self.line_sprite_count]) |*sprite| {
-            sprite.fetch_dots = 0;
-            var penalty: u16 = 0;
-
-            if (sprite.oam_x == 0) {
-                // X=0 has the full 11-dot startup cost, but overlapping
-                // objects reuse the same background-fetch alignment and add
-                // only the flat six-dot object fetch.
-                const tile: i16 = -1;
-                penalty = if (last_tile == null or last_tile.? != tile) 11 else 6;
-                last_tile = tile;
-            } else {
-                if (sprite.oam_x > 167) continue;
-
-                const screen_x = @as(i16, sprite.oam_x) - 8;
-                const window_start = @as(i16, bus.io.getWx()) - 7;
-                const using_window = self.isWindowVisible(bus) and screen_x >= window_start;
-                const fetch_x = if (using_window)
-                    screen_x - window_start
-                else
-                    screen_x + @as(i16, bus.io.getScx());
-                // Background and window fetch tiles are separate identities,
-                // even if their numeric coordinates happen to match.
-                const tile = @divFloor(fetch_x, 8) + (if (using_window) @as(i16, 0x100) else 0);
-                penalty = 6;
-                if (last_tile == null or last_tile.? != tile) {
-                    const pixel_in_tile: u4 = @intCast(@mod(fetch_x, 8));
-                    if (pixel_in_tile < 5) penalty += 5 - pixel_in_tile;
-                    last_tile = tile;
-                }
-            }
-
-            const accepted = @min(penalty, max_penalty - total);
-            sprite.fetch_dots = @intCast(accepted);
-            total += accepted;
-            if (total == max_penalty) break;
-        }
-        return total;
-    }
-
     fn isWindowVisible(self: *const Ppu, bus: anytype) bool {
         const lcdc = bus.io.getLcdc();
         return (lcdc & 0x21) == 0x21 and
@@ -597,6 +673,7 @@ pub const Ppu = struct {
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
+            self.resetObjectFetcher();
         } else if (!was_enabled) {
             self.ly = 0;
             self.mode = .HBlank;
@@ -610,6 +687,7 @@ pub const Ppu = struct {
             self.line_sprite_count = 0;
             self.oam_scan_index = 0;
             self.object_fifo.clear();
+            self.resetObjectFetcher();
         }
     }
 
@@ -836,7 +914,6 @@ test "mode 3 timing includes fine scroll, window, and visible objects" {
     ppu.line_sprite_count = 1;
     ppu.beginPixelTransfer(&bus);
     try std.testing.expectEqual(@as(u16, 183), ppu.mode3_duration);
-    try std.testing.expectEqual(@as(u8, 11), ppu.line_sprites[0].fetch_dots);
 }
 
 test "mode 3 emits background pixels through the dot FIFO" {
@@ -910,4 +987,86 @@ test "mode 2 selects sprites and the object FIFO mixes them at output" {
     ppu.tick(183, &bus);
     try std.testing.expectEqual(PpuMode.HBlank, ppu.mode);
     try std.testing.expectEqual(DmgColor.LightGray, ppu.frame_buffer[0][0]);
+}
+
+test "object fetch reads tile bytes in phases and commits only when complete" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const IoReg = @import("../memory/io.zig").IoReg;
+    const TestBus = struct {
+        io: IoRegisters,
+        vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
+        object_low_reads: u8 = 0,
+        object_high_reads: u8 = 0,
+
+        pub fn readVram(self: *@This(), address: u16) u8 {
+            if (address == 0x8010) self.object_low_reads += 1;
+            if (address == 0x8011) self.object_high_reads += 1;
+            return self.vram[address - 0x8000];
+        }
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    bus.io.data[@intFromEnum(IoReg.LCDC)] |= 0x02;
+    bus.vram[0x10] = 0xFF;
+
+    var ppu = Ppu.init();
+    ppu.enabled = true;
+    ppu.ly = 0;
+    ppu.line_sprites[0] = .{ .oam_y = 16, .oam_x = 8, .tile = 1 };
+    ppu.line_sprite_count = 1;
+    ppu.beginPixelTransfer(&bus);
+
+    // Five alignment dots may advance the BG fetcher, followed by the
+    // two-dot tile phase. Neither object tile byte has been sampled yet.
+    for (0..7) |_| try std.testing.expect(ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    try std.testing.expectEqual(@as(u8, 0), bus.object_low_reads);
+    try std.testing.expectEqual(@as(u8, 0), bus.object_high_reads);
+    try std.testing.expectEqual(@as(u2, 0), ppu.object_fifo.pixels[0].color_id);
+
+    for (0..2) |_| try std.testing.expect(ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    try std.testing.expectEqual(@as(u8, 1), bus.object_low_reads);
+    try std.testing.expectEqual(@as(u8, 0), bus.object_high_reads);
+    try std.testing.expectEqual(@as(u2, 0), ppu.object_fifo.pixels[0].color_id);
+
+    for (0..2) |_| try std.testing.expect(ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    try std.testing.expectEqual(@as(u8, 1), bus.object_high_reads);
+    try std.testing.expectEqual(@as(u2, 1), ppu.object_fifo.pixels[0].color_id);
+    try std.testing.expectEqual(ObjectFetchPhase.idle, ppu.object_fetch_phase);
+}
+
+test "disabling objects cancels an in-flight fetch without stale pixels" {
+    const IoRegisters = @import("../memory/io.zig").IoRegisters;
+    const IoReg = @import("../memory/io.zig").IoReg;
+    const TestBus = struct {
+        io: IoRegisters,
+        vram: [0x2000]u8 = [_]u8{0} ** 0x2000,
+
+        pub fn readVram(self: *const @This(), address: u16) u8 {
+            return self.vram[address - 0x8000];
+        }
+    };
+
+    var bus: TestBus = .{ .io = IoRegisters.init(std.testing.allocator) };
+    defer bus.io.deinit();
+    bus.io.data[@intFromEnum(IoReg.LCDC)] |= 0x02;
+    bus.vram[0x10] = 0xFF;
+
+    var ppu = Ppu.init();
+    ppu.enabled = true;
+    ppu.ly = 0;
+    ppu.line_sprites[0] = .{ .oam_y = 16, .oam_x = 8, .tile = 1 };
+    ppu.line_sprite_count = 1;
+    ppu.beginPixelTransfer(&bus);
+
+    for (0..9) |_| try std.testing.expect(ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    bus.io.data[@intFromEnum(IoReg.LCDC)] &= ~@as(u8, 0x02);
+    try std.testing.expect(!ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    try std.testing.expectEqual(ObjectFetchPhase.idle, ppu.object_fetch_phase);
+
+    bus.io.data[@intFromEnum(IoReg.LCDC)] |= 0x02;
+    try std.testing.expect(!ppu.tickObjectFetcher(&bus, bus.io.getLcdc()));
+    for (ppu.object_fifo.pixels) |pixel| {
+        try std.testing.expectEqual(@as(u2, 0), pixel.color_id);
+    }
 }
